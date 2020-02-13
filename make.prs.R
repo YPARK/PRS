@@ -32,7 +32,7 @@ dir.create(TEMP.DIR, recursive = TRUE, showWarnings = FALSE)
 
 dir.create(dirname(OUT.FILE), recursive = TRUE, showWarnings = FALSE)
 
-ld.tab = readr::read_tsv(LD.FILE) %>%
+ld.tab = readr::read_tsv(LD.FILE, col_types='cii') %>%
     mutate(query = chr %&&% ':' %&&% (start + 1) %&&% '-' %&&% (stop - 1)) %>%
     as.data.frame()
 
@@ -56,6 +56,7 @@ if(!("snp.loc" %in% .names)){
     effect.tab[, snp.loc := `stop`]
 }
 
+effect.tab = effect.tab[]
 
 #' @param .svd SVD result
 #' @param tau regularization parameter
@@ -143,18 +144,26 @@ take.prs.ld <- function(r) {
     .effect.2 = effect.tab[chr == .chr.num & snp.loc >= .lb & snp.loc <= .ub]
 
     .effect = rbind(.effect.1, .effect.2)
-    .effect = .effect[, chr := NULL]
+    .effect = .effect[, chr := NULL][]
+
+    log.msg("Take an LD block: %d SNPs", nrow(.effect))
 
     if(nrow(.effect) == 0) return(list())
 
-    .plink = subset.plink(PLINK.DIR %&% .chr, .chr, .lb, .ub, TEMP.DIR)
-    .plink.ref = subset.plink(REF.PLINK.DIR %&% .chr, .chr, .lb, .ub, TEMP.DIR)
+    .plink = subset.plink(PLINK.DIR %&% "/" %&% .chr, .chr, .lb, .ub, TEMP.DIR)
+    .plink.ref = subset.plink(REF.PLINK.DIR %&% "/" %&% .chr, .chr, .lb, .ub, TEMP.DIR)
+
+    log.msg("Read genotypes: n=%d, n=%d", nrow(.plink$BED), nrow(.plink.ref$BED))
+
     .matched = match.plink(.plink, .plink.ref)
 
     .plink = .matched$lhs
     .plink.ref = .matched$rhs
 
+    log.msg("After matching --> n=%d, n=%d", nrow(.plink$BED), nrow(.plink.ref$BED))
+
     if(is.null(.plink)) return(list())
+    if(is.null(.plink.ref)) return(list())
 
     valid.snps = .plink$BIM %>%
         select(-missing, -rs) %>%

@@ -44,11 +44,15 @@ subset.plink <- function(plink.hdr, chr, plink.lb, plink.ub, temp.dir) {
         chr.num = gsub(pattern = 'chr', replacement = '', chr) %>%
             as.integer()
 
-        plink.cmd = sprintf('./bin/plink --bfile %s --make-bed --geno 0.05 --maf 0.05 --chr %d --from-bp %d --to-bp %d --out %s', plink.hdr, chr.num, plink.lb, plink.ub, temp.dir %&% '/plink')
+        out.hdr = temp.dir %&% '/plink'
+
+        plink.cmd = sprintf('rm -f %s.*; ./bin/plink --bfile %s --make-bed --geno 0.05 --maf 0.05 --chr %d --from-bp %d --to-bp %d --out %s', out.hdr, plink.hdr, chr.num, plink.lb, plink.ub, out.hdr)
+
+        ## print(plink.cmd)
 
         system(plink.cmd, ignore.stdout = TRUE, ignore.stderr = TRUE)
 
-        plink = zqtl::read.plink(temp.dir %&% '/plink')
+        plink = zqtl::read.plink(out.hdr)
         colnames(plink$BIM) = c('chr', 'rs', 'missing', 'snp.loc', 'plink.a1', 'plink.a2')
         colnames(plink$FAM) = c('fam', 'iid', 'father', 'mother', 'sex.code', '.pheno')
 
