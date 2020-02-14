@@ -148,7 +148,7 @@ take.prs.ld <- function(r) {
 
     log.msg("Take an LD block: %d SNPs", nrow(.effect))
 
-    if(nrow(.effect) == 0) return(list())
+    if(nrow(.effect) == 0) return(list(cor = NA))
 
     .plink = subset.plink(PLINK.DIR %&% "/" %&% .chr, .chr, .lb, .ub, TEMP.DIR)
     .plink.ref = subset.plink(REF.PLINK.DIR %&% "/" %&% .chr, .chr, .lb, .ub, TEMP.DIR)
@@ -162,8 +162,8 @@ take.prs.ld <- function(r) {
 
     log.msg("After matching --> n=%d, n=%d", nrow(.plink$BED), nrow(.plink.ref$BED))
 
-    if(is.null(.plink)) return(list())
-    if(is.null(.plink.ref)) return(list())
+    if(is.null(.plink)) return(list(cor = NA))
+    if(is.null(.plink.ref)) return(list(cor = NA))
 
     valid.snps = .plink$BIM %>%
         select(-missing, -rs) %>%
@@ -177,7 +177,7 @@ take.prs.ld <- function(r) {
 
     if(nrow(valid.snps) == 0) {
         log.msg("No SNPs that satisfy our criteria")
-        return(list())
+        return(list(cor = NA))
     }
 
     valid.snps = valid.snps %>%
@@ -206,17 +206,18 @@ take.prs.ld <- function(r) {
 
 prs.list = lapply(1:nrow(ld.tab), take.prs.ld)
 
-tau.values = sapply(prs.list, function(x) x$tau)
 cor.values = sapply(prs.list, function(x) x$cor)
 
-cutoff = quantile(cor.values, seq(.2, .8, .2))
+cutoff = quantile(cor.values, seq(.2, .8, .2), na.rm=TRUE)
 
 out.tab = data.table()
 
-for(v in cutoff) {
+for(l in seq_along(cutoff)) {
+
+    v = cutoff[l] - 1e-8
 
     .fun = function(x) {
-        if(x$cor >= v) return(cbind(x$iid, x$y))
+        if(!is.na(x$cor) && x$cor >= v) return(cbind(x$iid, x$y))
         return(data.table())
     }
 
@@ -224,6 +225,7 @@ for(v in cutoff) {
     .dt = do.call(rbind, .dt)
     .dt = .dt[, .(score = sum(score)), by = iid]
     .dt = .dt[, cutoff := v]
+    .dt = .dt[, level := l]
 
     out.tab = rbind(out.tab, .dt)
 }
