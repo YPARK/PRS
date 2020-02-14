@@ -1,0 +1,311 @@
+---
+title: "Polygenic risk scores of Brad Ruzicka's chort"
+author: "Yongjin Park"
+date: "`r Sys.time()`"
+fig_caption: yes
+theme: "jekyll-theme-minimal"
+csl: "apa.csl"
+bibliography: "mediation.bib"
+---
+
+<style>
+p.caption {
+  font-size: 0.6em;
+}
+</style>
+
+```{r global_opt, include = FALSE}
+options(stringsAsFactors = FALSE)
+source('../Util.R')
+source('Util-rmd.R')
+library(tidyverse)
+library(data.table)
+fig.dir <- 'Fig/2020-02-14/'
+dir.create(fig.dir, recursive = TRUE, showWarnings = FALSE)
+knitr::opts_knit$set(eval.after = 'fig.cap')
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE,
+                      fig.path = fig.dir, fig.width = 8, fig.height = 8)
+FIG.CAP <- '**Fig.**'
+```
+
+```{r}
+annot.file = "../data/Ruzicka_Annotatoin.csv.gz"
+annot.tab = fread(annot.file)
+#' Annotate PRS tab by Brad Ruzicka's Dx
+annotate.dt <- function(data.tab,
+                        .dx = c("c", "bd", "s"),
+                        .dx.str = c("Control", "BIP", "SZ")
+                        ) {
+
+    .level = sort(unique(data.tab$cutoff)) %>%
+        (function(x) "LD cutoff r > " %&% round(x, 2))
+
+
+    .dt = merge(data.tab, annot.tab, by = "iid")
+    .dt = .dt[, Dx := factor(Dx, .dx, .dx.str)]
+    .dt = .dt[, lvl := factor(level, 1:4, .level)]
+    .dt = .dt[, scr := scale(score), by = level]
+    return(.dt)
+}
+
+show.boxplot <- function(data.tab) {
+    
+    .cmp = list(c("Control", "BIP"), c("BIP", "SZ"), c("Control", "SZ"))
+    .colors = c("#999999", "#7FCDBB", "#2C7FB8")
+
+    .gg.plot(data.tab, aes(x = Dx, y = scr)) +
+        facet_wrap(~lvl, scales="free", nrow = 1) + 
+        xlab("Individuals grouped by diagnosis") +
+        geom_violin(aes(fill=Dx), show.legend=FALSE, size=0, trim=FALSE) +
+        ggpubr::stat_compare_means(size=3, comparisons=.cmp, method="t.test") +
+        geom_boxplot(fill="white", width=.2, outlier.size=.05) +
+        scale_fill_manual(values=.colors)
+}
+```
+
+### GWAS summary data
+
+We obtained publicly avaiable GWAS summary statistics from the three
+different sources:
+
+1. CTG: [Complex Trait Genetics Lab](https://ctg.cncr.nl/).
+2. PGC: [Psychiatric Genomics Consortium](https://www.med.unc.edu/pgc/).
+3. SSGAC: [Social Science Genetic Association Consortium](https://www.thessgac.org/).
+
+Of all the traits, we investigate on the GWAS data collected from
+individuals of European ancestry, and summary statistics complete with
+both effect sizes and standard errors.
+
+* AD (CTG): Alzheimer's disease case/control [@Jansen2018-ss]
+* DEPRESSED-A (CTG): depressed affect (of neuroticism) case/control [@Nagel2018-ho]
+* WORRY (CTG): Worry (of neuroticism) case/control [@Nagel2018-ho]
+* INSOMNIA (CTG): Insomnia case/control [@Jansen2019-yo]
+* IQ (CTG): Intelligence meta-analysis across relevant phenotypes [@Savage2018-lj]
+* ADHD (PGC): Attention-deficit/hyperactivity disorder case/control [@Neale2010-mc]
+* ASD (PGC): Autism spectrum disorder case/control [@Autism_Spectrum_Disorders_Working_Group_of_The_Psychiatric_Genomics_Consortium2017-ey]
+* BIP (PGC): Bipolar disorder case/control [@Stahl2018-du]
+* MDD (PGC): Major depressive disorder case/control [@Wray2018-ie]
+* OCD (PGC): Obsessive-compulsive disorder case/control [@International_Obsessive_Compulsive_Disorder_Foundation_Genetics_Collaborative_IOCDF-GC_and_OCD_Collaborative_Genetics_Association_Studies_OCGAS2018-lu]
+* PTSD (PGC): Post-traumatic stress disorder case/control [@Duncan2018-pd]
+* SCZ (PGC): Schizophrenia case/control [@Schizophrenia_Working_Group_of_the_Psychiatric_Genomics_Consortium2014-ro]
+* COG (SSGAC): cognitive performance [@Lee2018-ls]
+* EDU (SSGAC): educational attainment [@Lee2018-ls]
+* EVER-SMOKE (SSGAC): Ever smoker case/control meta-analysis of TAG consortium with UK Biobank [@Karlsson_Linner2019-cl]
+* SPEEDING (SSGAC): Automobile speeding propensity in UK Biobank [@Karlsson_Linner2019-cl]
+* NDRINK-WEEK (SSGAC): Number of drinks per week in UK Biobank [@Karlsson_Linner2019-cl]
+* NSEX-PART (SSGAC): Number of sexual partners in UK Biobank [@Karlsson_Linner2019-cl]
+* RISK-PC1 (SSGAC): The first principle components of the four risky behaviors [@Karlsson_Linner2019-cl]
+* RISK-TOL (SSGAC): Risk tolerance [@Karlsson_Linner2019-cl]
+
+
+## Results
+
+### The results of Schizophrenia PRS
+
+```{r fig_prs_sz_boxplot, fig.width=8, fig.height=3}
+scz.file = "share/PRS_Ruzicka/pgc_scz.prs.gz"
+scz.tab = fread(scz.file) %>% annotate.dt()
+
+plt = show.boxplot(scz.tab) +
+    ylab("Scaled PRS of SZ")
+
+print(plt)
+.file = fig.dir %&% "/fig_prs_sz_boxplot.pdf"
+.gg.save(.file, width=8, height=3)
+```
+
+```{r results="asis"}
+cat("[PDF](" %&% .file %&% ")\n\n")
+```
+
+Since we have the actual phenotype information for these individuals,
+we can estimate the proportion of variance explained by PRS models by
+fitting a generalized linear model.
+
+```{r}
+#' Calculate PVE by glm
+#' @param l
+#' @param .dx
+#' @param .dt
+#' @param .exclude
+glm.pve <- function(l, .dx, .data.dt, .exclude = c(), family="binomial") {
+                    
+    .df = .data.dt[level == l] %>%
+        as_tibble() %>%
+        filter(!(Dx %in% .exclude)) %>%
+        mutate(y = if_else(Dx == .dx, 1, 0)) %>%
+        rename(x = score) %>%
+        select(x, y)
+
+    .glm = glm(y ~ x, data = .df, family=family)
+
+    .df = .df %>% mutate(pr = .glm$fitted.values) %>%
+        arrange(x)
+
+    .aov = aov(.glm) %>%
+        summary() %>%
+        (function(x) x[[1]])
+
+    .pve = .aov["Sum Sq"] %>% (function(x) x/sum(x))
+    .pv = .aov["x", "Pr(>F)"]
+
+    list(pve=.pve["x", "Sum Sq"], p.val=.pv, df = .df,
+         lab = .dx, glm = .glm)
+}
+
+#' @param .pve
+show.pve <- function(.pve){
+
+    .title = "var. explained: " %&%
+        num.round(100 *.pve$pve, 2) %&% "%" %&%
+        ", P: " %&% num.sci(.pve$p.val)
+
+    .gg.plot(.pve$df, aes(x = x, y = y)) +
+        theme(title = element_text(size=8)) +
+        ylab("probability of " %&% .pve$lab) +
+        geom_point(position=position_jitter(0, 0.01), pch=21) +
+        geom_line(aes(y=pr), size = 1) +
+        ggtitle(.title)
+}
+```
+
+
+```{r fig_prs_sz_logit, fig.width=3, fig.height=3}
+plt = glm.pve(1, "SZ", scz.tab, "BIP") %>%
+    show.pve() +
+    xlab("PRS of SZ")
+
+print(plt)
+.file = fig.dir %&% "/fig_prs_sz_logit.pdf"
+.gg.save(.file, width=8, height=3)
+```
+
+```{r results="asis"}
+cat("[PDF](" %&% .file %&% ")\n\n")
+```
+
+### The results of Bipolar disorder PRS
+
+```{r fig_prs_bip_boxplot, fig.width=8, fig.height=3}
+bip.file = "share/PRS_Ruzicka/pgc_bip.prs.gz"
+bip.tab = fread(bip.file) %>% annotate.dt()
+
+plt = show.boxplot(bip.tab) +
+    ylab("Scaled PRS of Bipolar")
+
+print(plt)
+.file = fig.dir %&% "/fig_prs_bip_boxplot.pdf"
+.gg.save(.file, width=8, height=3)
+```
+
+```{r results="asis"}
+cat("[PDF](" %&% .file %&% ")\n\n")
+```
+
+### Patient groups
+
+```{r}
+temp.data.file = 'report_2020-02-14_cluster.rdata'
+
+if(!file.exists(temp.data.file)) {
+
+    M.tab = total.tab %>%
+        filter(level == 1) %>% 
+        rename(row = trait, weight = score) %>%
+        select(row, iid, weight) %>%
+        spread(key=row, value = weight)
+
+    .iid = M.tab$iid
+
+    n.ind = nrow(M.tab)
+
+    M.mat = M.tab %>%
+        select(-iid) %>%
+        as.matrix() %>%
+        scale()
+    
+    rownames(M.mat) = M.tab$iid
+        
+    clust = cluster.row_col(M.mat, 10, 10)
+
+    save(list=c('clust','M.tab'), file=temp.data.file)
+} else {
+    load(file=temp.data.file)
+}
+```
+
+```{r fig_pr_heatmap, fig.width=4, fig.height=5}
+
+n.ind = nrow(M.tab)
+
+.oo = clust$df %>% order.pair()
+
+.df = clust$df %>%
+    mutate(weight = pmax(weight, -3)) %>% 
+    mutate(weight = pmin(weight, 3)) %>% 
+    mutate(iid = factor(row, .oo$rows)) %>%
+    mutate(trait = factor(col, .oo$cols))
+
+plt = .gg.plot(.df, aes(x=trait, y=iid, fill=weight)) +
+    facet_grid(row_group ~ col_group, scales="free", space="free") +
+    geom_tile() +
+    scale_x_discrete(position="top") +
+    scale_fill_distiller("PRS ", palette = "PuOr", direction=-1) +
+    theme(panel.spacing=unit(.1, "lines")) +
+    theme(axis.text.x = element_text(angle=90,vjust=0,hjust=0)) +
+    theme(axis.text.y = element_blank()) +
+    theme(axis.ticks.y = element_blank()) +
+    theme(strip.text = element_blank()) +
+    theme(legend.position = "bottom") +
+    ylab(n.ind %&% " subjects") +
+    xlab("Traits")
+
+print(plt)
+.file = fig.dir %&% "/fig_prs_heatmap.pdf"
+.gg.save(.file, width=4, height=5)
+```
+
+
+```{r results="asis"}
+cat("[PDF](" %&% .file %&% ")\n\n")
+```
+
+## methods
+
+### Robust polygenic risk score prediction by spectral decomposition
+
+We estimate polygenic risk score (PRS) using spectral decomposition of
+the underlying genotype matrix, $X$ (sample by variants), of the
+cohort.  We propose a robust and straightforward PRS method that
+estimates a vector of multivariate effect size, $\boldsymbol{\theta}$,
+from a vector of univariate GWAS summary statistics.  If we have
+sufficiently large number of individuals, we can simply estimate
+$\boldsymbol{\theta} = R^{-1} \mathbf{z}$ by taking an inverse matrix
+of the LD matrix, namely $R \overset{\Delta}{=} X^{\top}X/n$. In
+practice, we take the psuedo-inverse of $R$, namely $R^{-1}\approx
+VD^{-2}V^{\top}$, based on singular value decomposition of the
+genotype matrix, $X=UDV^{\top}$, and this results in the estimate of
+multivariate effect size $\boldsymbol{\theta} \approx
+VD^{-2}V^{\top}\mathbf{z}$. By substituting this result to a linear
+model, $\mathbf{y} \sim X \boldsymbol{\theta}$, we predict a PRS
+vector, $\hat{\mathbf{y}} = UD^{-1}V^{\top}\mathbf{z}$. To account for
+discrepancy of the LD matrix $R$ between our cohort and the actual
+GWAS cohort, we introduce regularization parameter $\tau$ (ridge
+regression): $\hat{\mathbf{y}} = U(D + \tau I)^{-1}V^{\top}
+\mathbf{z}$.
+
+### Hyper-parameter tuning without phenotype labels
+
+A conventional PRS approach tunes hyper-parameters, such as p-value thresholding and LD-clumping, by comparing the predicted PRS vector $\hat{\mathbf{y}}$ against actual observed phenotypes $\mathbf{y}_{\mathsf{obs}}$. Here, we show that the regularization parameter $\tau$ can be optimized without looking at the observed $\mathbf{y}_{\mathsf{obs}}$. Instead of optimizing the prediction accuracy cross-validated against a small cohort of individuals, we focus on improving the robustness of PRS methods across multiple cohorts.  The basic idea is that we want a prediction score (and the underlying regression coefficient matrix) is robustly reproducible across multiple cohorts.
+
+Here we use the genotypes of `r n.ind` individuals as a primary matrix $X$, while additionally using the 1000G reference panel genotype matrix $\tilde{X}$.  Let us define the multivariate regression parameters $\hat{\theta}(\tau) \overset{\Delta}{=} V(D + \tau I)^{-2}V^{\top}\mathbf{z}$ as a function of the hyperparameter $\tau$. We can construct a prediction vector on a new genotype matrix $\tilde{X}$ for each $\tau$ value, namely $\mathbf{y}(\tau)\overset{\Delta}{=} \tilde{X} \hat{\theta}(\tau)$. On the other hand, based on the SVD of the 1000G panel, namely $\tilde{X} = \tilde{U} \tilde{D} \tilde{V}^{\top}$, we can construct another PRS vector $\tilde{\mathbf{y}} = \tilde{U} \tilde{D}^{-1} \tilde{V}^{\top} \mathbf{z}$.
+
+Since these two PRS vectors are based on the same set of individuals (\tilde{X} matrix), we can measure the concordance between them by Spearman's correlation. Based on this score, we tune the parameter $\tau$, namely, $\hat{\tau} \gets \underset{\tau}{\arg\max} \, \mathsf{corr}(\mathbf{y}(\tau), \tilde{\mathbf{y}})$. To find the optimal point, we employ a simple line search algorithm.
+
+ 
+
+
+
+
+## Reference
+
