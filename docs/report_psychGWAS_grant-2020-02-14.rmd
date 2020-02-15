@@ -177,7 +177,7 @@ plt = glm.pve(1, "SZ", scz.tab, "BIP") %>%
 
 print(plt)
 .file = fig.dir %&% "/fig_prs_sz_logit.pdf"
-.gg.save(.file, width=8, height=3)
+.gg.save(.file, width=3, height=3)
 ```
 
 ```{r results="asis"}
