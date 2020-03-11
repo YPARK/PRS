@@ -1,0 +1,187 @@
+---
+title: "The enrichemnt of polygenic risk scores in ScSZ"
+author: "Yongjin Park"
+date: "`r Sys.time()`"
+fig_caption: yes
+theme: "jekyll-theme-minimal"
+csl: "apa.csl"
+bibliography: "mediation.bib"
+---
+
+
+```{r global_opt, include = FALSE}
+options(stringsAsFactors = FALSE)
+source('../Util.R')
+source('Util-rmd.R')
+library(tidyverse)
+library(data.table)
+fig.dir <- 'Fig/2020-03-10/'
+dir.create(fig.dir, recursive = TRUE, showWarnings = FALSE)
+knitr::opts_knit$set(eval.after = 'fig.cap')
+knitr::opts_chunk$set(warning = FALSE, message = FALSE,
+                      fig.path = fig.dir, fig.width = 8, fig.height = 8)
+FIG.CAP <- '**Fig.**'
+```
+
+```{r}
+hto.file = "../data/HTO_Barcode_Key.csv" ## mapping
+.hto = read_csv(hto.file, col_types="ccc") %>%
+  rename(iid = Chip.Well.Barcode)
+```
+
+
+```{r ReadScSZ}
+a.data = readRDS("../data/ACTIONet_results.RDS")
+
+H = a.data$archetypes$H %>% t %>% as.data.table
+
+.iid = a.data$cell.meta %>%
+  select(HTO, Batch) %>% 
+  left_join(.hto, by = c("HTO", "Batch")) %>%
+  select(iid) %>%
+  as.data.table
+
+H = cbind(.iid, H)
+
+.collapse.dt <- function(H, .fun){
+  H[, lapply(.SD, .fun), by = .(iid)] %>%
+    as_tibble %>%
+    gather(key=archetype, value=activity, -iid)
+}
+
+h.sum = .collapse.dt(H, sum)
+h.mean = .collapse.dt(H, mean)
+h.sd = .collapse.dt(H, sd)
+h.cv = .collapse.dt(H, function(x) sd(x)/mean(x))
+```
+
+
+```{r}
+prs.assoc.tab <- function(prs.tab, stat.tab) {
+
+  .df = stat.tab %>%
+    left_join(prs.tab, by = "iid") %>%
+    spread(key = archetype, value = activity)
+
+  xx = .df %>% select(-iid, -score) %>% as.matrix
+  yy = .df %>% select(score) %>% as.matrix
+
+  x.tib = tibble(archetype = colnames(xx)) %>%
+    mutate(x.col = 1:n())
+
+  assoc.stat = calc.qtl.stat(xx, yy) %>%
+    left_join(x.tib, by = "x.col") %>%
+    mutate(q.val = p.adjust(p.val, method="BH")) %>% 
+    select(-x.col, -y.col)
+}
+
+read.assoc.tab <- function(f, .stat) {
+  b = basename(f) %>%
+    str_remove(".prs.gz") %>%
+    str_to_upper
+
+  fread(f) %>%
+    as_tibble %>%
+    filter(level == 1) %>%
+    select(iid, score) %>% 
+    prs.assoc.tab(stat.tab = .stat) %>%
+    mutate(trait = b)
+}
+
+plot.trait.assoc <- function(stat){
+
+  assoc.df = lapply(.files, read.assoc.tab, .stat = stat) %>%
+    bind_rows
+
+  .order = assoc.df %>%
+    mutate(col = trait, row = archetype, weight = -log10(p.val)) %>% 
+    order.pair
+
+  .df = assoc.df %>%
+    mutate(col = factor(trait, .order$cols), row = factor(archetype, .order$rows))
+
+  .tn = scales::trans_new("neg.pow.10", function(y) -log10(y), function(x) 10^(-x))
+
+  .df.sig = .df %>% filter(p.val < .05) %>% mutate(t.stat = beta/se)
+
+  plt = ggplot(.df, aes(x=col, y=row, fill=p.val)) +
+    scale_x_discrete(position = "top") +
+    theme(axis.text.x = element_text(angle=90, vjust=0, hjust=0)) +
+    xlab("GWAS traits") + ylab("Archetypes") +
+    geom_tile(size=.2) +
+    geom_text(data=.df.sig, mapping=aes(label=round(t.stat,1)), size=2) +
+    scale_fill_distiller("associatoin\np-value",
+                         direction = -1,
+                         palette="YlGnBu",
+                         breaks = c(.001, .01, .05, .5, 1),
+                         labels = num.sci,
+                         trans = .tn)
+  return(plt)
+}
+```
+
+
+### PRS association with the overall activity of 20 archetypes
+
+```{r FigTraitAssocSum, fig.width=5, fig.height=5}
+.files = list.files("share/PRS_Ruzicka/", pattern="prs.gz", full.names=TRUE)
+plt = plot.trait.assoc(h.sum) + ggtitle("archetype sum ~ PRS") 
+print(plt)
+.file = fig.dir %&% "/FigTraitAssocSum.pdf"
+.gg.save(filename = .file, plot = plt, width=5, height=5)
+```
+
+* The numbers denote t-statistics for the associations with nominal p-value < 0.05
+
+```{r results="asis"}
+cat("[PDF](" %&% .file %&% ")\n\n")
+```
+
+### PRS association with the mean of 20 archetypes
+
+```{r FigTraitAssocMean, fig.width=5, fig.height=5}
+.files = list.files("share/PRS_Ruzicka/", pattern="prs.gz", full.names=TRUE)
+plt = plot.trait.assoc(h.mean) + ggtitle("archetype mean ~ PRS") 
+print(plt)
+.file = fig.dir %&% "/FigTraitAssocMean.pdf"
+.gg.save(filename = .file, plot = plt, width=5, height=5)
+```
+
+* The numbers denote t-statistics for the associations with nominal p-value < 0.05
+
+```{r results="asis"}
+cat("[PDF](" %&% .file %&% ")\n\n")
+```
+
+### PRS association with the coefficient of variation (CV) of 20 archetypes
+
+```{r FigTraitAssocCV, fig.width=5, fig.height=5}
+.files = list.files("share/PRS_Ruzicka/", pattern="prs.gz", full.names=TRUE)
+plt = plot.trait.assoc(h.cv) + ggtitle("archetype CV ~ PRS") 
+print(plt)
+.file = fig.dir %&% "/FigTraitAssocCV.pdf"
+.gg.save(filename = .file, plot = plt, width=5, height=5)
+```
+
+* The numbers denote t-statistics for the associations with nominal p-value < 0.05
+
+```{r results="asis"}
+cat("[PDF](" %&% .file %&% ")\n\n")
+```
+
+
+### PRS association with the standard deviation of 20 archetypes
+
+```{r FigTraitAssocSd, fig.width=5, fig.height=5}
+.files = list.files("share/PRS_Ruzicka/", pattern="prs.gz", full.names=TRUE)
+plt = plot.trait.assoc(h.sd) + ggtitle("archetype SD ~ PRS") 
+print(plt)
+.file = fig.dir %&% "FigTraitAssocSd.pdf"
+.gg.save(filename = .file, plot = plt, width=5, height=5)
+```
+
+* The numbers denote t-statistics for the associations with nominal p-value < 0.05
+
+```{r results="asis"}
+cat("[PDF](" %&% .file %&% ")\n\n")
+```

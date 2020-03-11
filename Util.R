@@ -71,7 +71,6 @@ subset.plink <- function(plink.hdr, chr, plink.lb, plink.ub, temp.dir) {
     return(plink)
 }
 
-
 # Match the right-hand-side PLINK to the left-hand-side
 #' @param .plink.lhs
 #' @param .plink.rhs
@@ -133,103 +132,90 @@ match.plink <- function(.plink.lhs, .plink.rhs) {
     list(lhs = ret.lhs, rhs = ret.rhs)
 }
 
-## read.geno.data <- function(ld.idx,
-##                            cis.dist,
-##                            geno.dir,
-##                            temp.dir,
-##                            ld.file = 'LD.info.txt',
-##                            maf.cutoff = .01) {
+################################################################
+#' calculate univariate effect sizes and p-values
+#'
+#' @name calc.qtl.stat
+#' @usage calc.qtl.stat(xx, yy)
+#' @param xx n x p genotype matrix
+#' @param yy n x t phenotype matrix
+#' @param se.min mininum standard error (default: 1e-8)
+#' @param verbose (default: FALSE)
+#'
+#' @return summary statistics matrix
+#'
+#' @export
+#'
+calc.qtl.stat <- function(xx, yy, se.min = 1e-8, verbose = FALSE) {
 
-##     ld.info = read.table(ld.file, header = TRUE)
+    loadNamespace("dplyr")
+    loadNamespace("tidyr")
 
-##     if(ld.idx < 0) return(NULL)
-##     if(ld.idx > nrow(ld.info)) return(NULL)
+    zscore.pvalue <- function(x) {
+        2 * pnorm(abs(x), lower.tail=FALSE)
+    }
 
-##     ld.info = ld.info %r% ld.idx
-##     ld.lb = ld.info[1, 'start']
-##     ld.ub = ld.info[1, 'stop']
-##     chr.int = ld.info[1, 'chr'] %>%
-##         gsub(pattern = 'chr', replacement = '')
+    .xx = scale(xx)
+    .yy = scale(yy)
 
-##     plink = subset.plink(geno.dir %&&% '/chr' %&&% chr.int,
-##                          chr.int, ld.lb, ld.ub, temp.dir)
+    rm.na.zero <- function(xx) {
+        return(replace(xx, is.na(xx), 0))
+    }
 
-##     maf = apply(plink$BED, 2, mean, rm.na = TRUE) %>%
-##         (function(x) data.frame(maf = x)) %>%
-##         mutate(pos = 1:n())
+    ## cross-product is much faster than covariance function
+    n.obs = crossprod(!is.na(.xx), !is.na(.yy))
+    beta.mat = crossprod(.xx %>% rm.na.zero(), .yy %>% rm.na.zero()) / n.obs
 
-##     bim.cols = c('chr', 'rs', 'missing', 'snp.loc', 'plink.a1', 'plink.a2')
+    if(verbose){
+        log.msg('Computed cross-products')
+    }
 
-##     BIM = plink$BIM %>%
-##         (function(x) { colnames(x) = bim.cols; return(x); }) %>%
-##         mutate(chr=gsub(chr, pattern='chr', replacement='')) %>%
-##         mutate(chr='chr' %&&% chr) %>% 
-##         mutate(pos = 1:n()) %>%
-##         left_join(maf, by = 'pos') %>%
-##         filter(snp.loc >= ld.lb, snp.loc <= ld.ub) %>%
-##         na.omit() %>%
-##         filter(maf >= maf.cutoff, maf <= (1 - maf.cutoff))
+    ## residual standard deviation
+    resid.se.mat = matrix(NA, ncol(.xx), ncol(.yy))
 
-##     X = (plink$BED %c% BIM$pos) %>% scale() %>%
-##         (function(x) { x[is.na(x)] = 0; return(x) })
+    for(k in 1:ncol(.yy)) {
 
-##     ret = list(X = X, BIM = BIM)
-##     return(ret)
-## }
+        beta.k = beta.mat[, k]
+        yy.k = .yy[, k]
+        err.k = sweep(sweep(.xx, 2, beta.k, `*`), 1, yy.k, `-`)
+        se.k = apply(err.k, 2, sd, na.rm = TRUE)
 
-## ################################################################
-## ## standardize z-scores: First, fitting
-## ## z ~ N(R*(mu*I), tau^2*R)
-## ## then standardize
-## ## z = (z - mu*I) / tau
-## scale.zscore <- function(Z, V.t, D, stdize = TRUE) {
+        if(verbose) {
+            log.msg('Residual on the column %d', k)
+        }
+        resid.se.mat[, k] = se.k + se.min
+    }
 
-##     .p = ncol(V.t)
-##     .K = nrow(V.t)
+    ## organize as consolidated table
+    y.cols = 1:ncol(yy)
+    colnames(beta.mat) = y.cols
+    colnames(n.obs) = y.cols
+    colnames(resid.se.mat) = y.cols
 
-##     if(.K < 10) {
-##         return(Z)
-##     }
+    beta.tab = beta.mat %>%
+        as.data.frame() %>%
+        dplyr::mutate(x.col = 1:n()) %>%
+        tidyr::gather(key = 'y.col', value = 'beta', y.cols)
 
-##     DV.t = sweep(V.t, 1, D, `*`)
-##     .y = sweep(V.t, 1, D, `/`) %*% Z
-##     .x = DV.t %*% matrix(1, ncol(V.t), 1)
+    resid.se.tab = resid.se.mat %>%
+        as.data.frame() %>%
+        dplyr::mutate(x.col = 1:n()) %>%
+        tidyr::gather(key = 'y.col', value = 'resid.se', y.cols)
 
-##     .xx = .x / sqrt(.p) ## to scale down for numerical stability
-##     .num = t(.xx) %*% .y
-##     .denom = sum(.xx * .x)
+    nobs.tab = n.obs %>%
+        as.data.frame() %>%
+        dplyr::mutate(x.col = 1:n()) %>%
+        tidyr::gather(key = 'y.col', value = 'n', y.cols)
 
-##     .mu = .num / .denom
+    out.tab = beta.tab %>%
+        dplyr::left_join(nobs.tab, by = c('x.col', 'y.col')) %>%
+        dplyr::left_join(resid.se.tab, by = c('x.col', 'y.col')) %>%
+        dplyr::mutate(se = resid.se/sqrt(n)) %>%
+        dplyr::mutate(p.val = zscore.pvalue(beta/se))
 
-##     z.mean = t(DV.t) %*% (.x %*% .mu)
-##     if(stdize) {
-##         z.sd = (.y - .x %*% .mu) %>%
-##             (function(.c) apply(.c^2, 2, sum) / (.K - 1)) %>%
-##             sqrt()
-##         ret = sweep(Z - z.mean, 2, pmax(z.sd, 1e-8), `/`)
-##     } else {
-##         ret = Z - z.mean
-##     }
-##     return(ret)
-## }
+    out.tab = out.tab %>%
+        dplyr::mutate(x.col = as.integer(x.col)) %>%
+        dplyr::mutate(y.col = as.integer(y.col))
 
-## ################################################################
-## ## project z score matrix onto different LD block
-## rotate.Z <- function(.svd.1, .svd.0, z) {
-
-##     U.1 = .svd.1$U
-##     D.1 = .svd.1$D
-##     Vt.1 = .svd.1$V.t
-
-##     U.0 = .svd.0$U
-##     D.0 = .svd.0$D
-##     Vt.0 = .svd.0$V.t
-
-##     ret = (Vt.0 %*% z)
-##     ret = sweep(U.0, 2, D.0, `/`) %*% ret
-##     ret = t(U.1) %*% ret
-##     ret = sweep(t(Vt.1), 2, D.1, `*`) %*% ret
-
-##     ret = scale.zscore(ret, Vt.1, D.1)
-## }
-
+    return(out.tab)
+}

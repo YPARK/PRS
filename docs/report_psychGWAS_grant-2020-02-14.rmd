@@ -30,8 +30,31 @@ FIG.CAP <- '**Fig.**'
 
 ```{r}
 annot.file = "../data/Ruzicka_Annotatoin.csv.gz"
-annot.tab = fread(annot.file)
-#' Annotate PRS tab by Brad Ruzicka's Dx
+hto.file = "../data/HTO_Barcode_Key.csv" ## mapping
+demo.file = "../data/annotation_demographics.xlsx" #
+med.file = "../data/annotation_medication.xlsx"
+
+.hto = read_csv(hto.file) %>% rename(iid = Chip.Well.Barcode)
+
+.demo = readxl::read_excel(demo.file) %>%
+  mutate(.id = "Batch" %&% Batch %&% "_HTO" %&% HTO) %>%
+  select(-Batch, -HTO) %>%
+  rename(dx=Dx, gender=Gender)
+
+.med = readxl::read_excel(med.file) %>%
+  (function(x) { colnames(x)[1] = "med.key"; x }) %>%
+  gather(key = ".id", value = "med.val", -med.key) %>%
+  spread(key=med.key, value=med.val)
+
+annot.tab = read.csv(annot.file) %>%
+  left_join(.hto) %>%
+  mutate(.id = Batch %&% "_" %&% HTO) %>%
+  select(-Batch, -HTO) %>%
+  left_join(.demo) %>%
+  left_join(.med) %>%
+  as.data.table
+
+## Annotate PRS tab by Brad Ruzicka's Dx
 annotate.dt <- function(data.tab,
                         .dx = c("c", "bd", "s"),
                         .dx.str = c("Control", "BIP", "SZ")
@@ -49,12 +72,12 @@ annotate.dt <- function(data.tab,
 }
 
 show.boxplot <- function(data.tab) {
-    
+
     .cmp = list(c("Control", "BIP"), c("BIP", "SZ"), c("Control", "SZ"))
     .colors = c("#999999", "#7FCDBB", "#2C7FB8")
 
     .gg.plot(data.tab, aes(x = Dx, y = scr)) +
-        facet_wrap(~lvl, scales="free", nrow = 1) + 
+        facet_wrap(~lvl, scales="free", nrow = 1) +
         xlab("Individuals grouped by diagnosis") +
         geom_violin(aes(fill=Dx), show.legend=FALSE, size=0, trim=FALSE) +
         ggpubr::stat_compare_means(size=3, comparisons=.cmp, method="t.test") +
@@ -129,7 +152,7 @@ fitting a generalized linear model.
 #' @param .dt
 #' @param .exclude
 glm.pve <- function(l, .dx, .data.dt, .exclude = c(), family="binomial") {
-                    
+
     .df = .data.dt[level == l] %>%
         as_tibble() %>%
         filter(!(Dx %in% .exclude)) %>%
@@ -208,45 +231,62 @@ cat("[PDF](" %&% .file %&% ")\n\n")
 temp.data.file = 'report_2020-02-14_cluster.rdata'
 
 if(!file.exists(temp.data.file)) {
+  
+  .files = list.files("share/PRS_Ruzicka/", pattern="prs.gz", full.names=TRUE)
 
-    M.tab = total.tab %>%
-        filter(level == 1) %>% 
-        rename(row = trait, weight = score) %>%
-        select(row, iid, weight) %>%
-        spread(key=row, value = weight)
+  .fread <- function(f) {
+    b = basename(f) %>%
+      str_remove(".prs.gz") %>%
+      str_to_upper
 
-    .iid = M.tab$iid
+    ret = fread(f)
+    ret[, trait := b]
+  }
 
-    n.ind = nrow(M.tab)
+  total.tab = lapply(.files, .fread) %>% bind_rows
 
-    M.mat = M.tab %>%
-        select(-iid) %>%
-        as.matrix() %>%
-        scale()
-    
-    rownames(M.mat) = M.tab$iid
-        
-    clust = cluster.row_col(M.mat, 10, 10)
+  M.tab = total.tab %>%
+    filter(level == 1) %>%
+    rename(row = trait, weight = score) %>%
+    select(row, iid, weight) %>%
+    spread(key=row, value = weight)
+  
+  .iid = M.tab$iid
 
-    save(list=c('clust','M.tab'), file=temp.data.file)
+  n.ind = nrow(M.tab)
+
+  M.mat = M.tab %>%
+    select(-iid) %>%
+    as.matrix() %>%
+    scale()
+
+  M.mat[M.mat > 4] = 4
+  M.mat[M.mat < -4] = -4
+
+  rownames(M.mat) = M.tab$iid
+
+  clust = cluster.row_col(M.mat, 10, 10)
+
+  save(list=c('clust','M.tab'), file=temp.data.file)
 } else {
-    load(file=temp.data.file)
+  load(file=temp.data.file)
 }
 ```
 
-```{r fig_pr_heatmap, fig.width=4, fig.height=5}
+```{r fig_pr_heatmap, fig.width=3.5, fig.height=5}
 
 n.ind = nrow(M.tab)
 
 .oo = clust$df %>% order.pair()
 
 .df = clust$df %>%
-    mutate(weight = pmax(weight, -3)) %>% 
-    mutate(weight = pmin(weight, 3)) %>% 
+    mutate(weight = pmax(weight, -3)) %>%
+    mutate(weight = pmin(weight, 3)) %>%
     mutate(iid = factor(row, .oo$rows)) %>%
     mutate(trait = factor(col, .oo$cols))
 
-plt = .gg.plot(.df, aes(x=trait, y=iid, fill=weight)) +
+plt =
+  .gg.plot(.df, aes(x=trait, y=row, fill=weight)) +
     facet_grid(row_group ~ col_group, scales="free", space="free") +
     geom_tile() +
     scale_x_discrete(position="top") +
@@ -261,14 +301,23 @@ plt = .gg.plot(.df, aes(x=trait, y=iid, fill=weight)) +
     xlab("Traits")
 
 print(plt)
-.file = fig.dir %&% "/fig_prs_heatmap.pdf"
-.gg.save(.file, width=4, height=5)
-```
 
+.file = fig.dir %&% "/fig_prs_heatmap.pdf"
+.gg.save(.file, width=3.5, height=5)
+```
 
 ```{r results="asis"}
 cat("[PDF](" %&% .file %&% ")\n\n")
 ```
+
+```{r}
+.dt = scz.tab[level == 1]
+
+
+
+
+```
+
 
 ## methods
 
@@ -302,10 +351,9 @@ Here we use the genotypes of `r n.ind` individuals as a primary matrix $X$, whil
 
 Since these two PRS vectors are based on the same set of individuals (\tilde{X} matrix), we can measure the concordance between them by Spearman's correlation. Based on this score, we tune the parameter $\tau$, namely, $\hat{\tau} \gets \underset{\tau}{\arg\max} \, \mathsf{corr}(\mathbf{y}(\tau), \tilde{\mathbf{y}})$. To find the optimal point, we employ a simple line search algorithm.
 
- 
+
 
 
 
 
 ## Reference
-

@@ -1,0 +1,1115 @@
+---
+title: "Polygenic risk scores of mental health traits identify regulatory mechanisms in GTEx tissues"
+author: "Yongjin Park"
+date: "`r Sys.time()`"
+fig_caption: yes
+theme: "jekyll-theme-minimal"
+csl: "apa.csl"
+bibliography: "mediation.bib"
+---
+
+
+```{r global_opt, include = FALSE}
+################################################################
+options(stringsAsFactors = FALSE)
+library(dplyr)
+source('Util-rmd.R')
+source('../Util.R')
+fig.dir <- 'Fig/gtex/'
+dir.create(fig.dir, recursive = TRUE, showWarnings = FALSE)
+knitr::opts_knit$set(eval.after = 'fig.cap')
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE,
+                      fig.path = fig.dir, fig.width = 8, fig.height = 8)
+FIG.CAP <- '**Fig.**'
+```
+
+```{r ReadCodingGene}
+################################################################
+temp.data.file = 'gene_info.rdata'
+if(!file.exists(temp.data.file)) {
+
+    ensembl = biomaRt::useMart(biomart='ENSEMBL_MART_ENSEMBL',
+                               host='useast.ensembl.org',
+                               path='/biomart/martservice', dataset='hsapiens_gene_ensembl')
+
+    ensembl.hs = biomaRt::useDataset('hsapiens_gene_ensembl',mart=ensembl)
+
+    .attr = c('ensembl_gene_id',
+              'hgnc_symbol',
+              'transcription_start_site',
+              'transcript_start',
+              'transcript_end',
+              'description',
+              'percentage_gene_gc_content')
+
+    .temp = biomaRt::getBM(attributes=.attr,
+                           filters='biotype',
+                           values=c('protein_coding'),
+                           mart=ensembl.hs)
+    
+    genes.desc = .temp %>%
+        select(hgnc_symbol, description) %>%
+        unique()
+
+    coding.genes = .temp %>%
+        group_by(ensembl_gene_id) %>%
+        summarize(hgnc_symbol = paste(unique(hgnc_symbol), collapse='|'),
+                  transcription_start_site = mean(transcription_start_site),
+                  transcript_start = min(transcript_start),
+                  transcript_end = max(transcript_end),
+                  percentage_gene_gc_content = mean(percentage_gene_gc_content)) %>%
+        ungroup()
+
+    ensg.tot = unique(coding.genes$ensembl_gene_id)
+    go.attr = c('ensembl_gene_id', 'go_id', 'name_1006', 'namespace_1003')
+    genes.go = biomaRt::getBM(filters = 'ensembl_gene_id', values = ensg.tot,
+                            attributes = go.attr,
+                            mart = ensembl.hs)
+
+    save(list = c('coding.genes','genes.go','genes.desc'), file = temp.data.file)
+} else {
+    load(temp.data.file)
+}
+################################################################
+```
+
+
+```{r ReadData, include = FALSE}
+################################################################
+.list.prs <- function(...) {
+    list.files(...,
+               pattern = '.prs.gz',
+               full.names = TRUE)
+}
+
+linearize <- function(tab, key.name) {
+    tab %>%
+        select_(.dots = c('fam', 'iid', 'trait', key.name)) %>%
+        spread_(key_col = 'trait', value_col = key.name)
+}
+
+.read.tsv <- function(...) suppressMessages(readr::read_tsv(...))
+
+prs.dir = 'share/PRS_gtex_hg38/'
+prs.files = .list.prs(prs.dir)
+prs.data = prs.files %>%
+    lapply(FUN = .read.tsv) %>%
+    bind_rows()
+
+.read.eqts <- function(.file){
+
+    .qval <- function(z) {
+        fdr.out = suppressMessages(fdrtool::fdrtool(z, statistic = 'normal', plot = FALSE))
+        return(fdr.out$qval)
+    }
+
+    .tis = basename(.file) %>% gsub(pattern='.eqts.gz',replacement='')
+
+    ret = suppressMessages(readr::read_tsv(.file)) %>%
+        (function(x) { colnames(x)[1]='chr'; x }) %>%
+        mutate(q.val.ruv = .qval(z.ruv)) %>% 
+        mutate(q.val.res = .qval(z.res)) %>%
+        mutate(tis = .tis) %>% 
+        tidyr::separate('gene_id', c('ensembl_gene_id', 'rm'), sep = '[.]') %>%
+        select(-rm)
+}
+
+.combine.by.trait <- function(trait.dir, out.dir) {
+
+    .trait = basename(trait.dir)
+    out.file = out.dir %&&% '/' %&&% .trait %&&% '.bed.bgz'
+
+    if(!file.exists(out.file)) {
+
+        .files = list.files(trait.dir, pattern='.eqts.gz', full.names = TRUE)
+        .tab = .files %>%
+            lapply(FUN = .read.eqts) %>%
+            bind_rows() %>%
+            mutate(trait = .trait) %>% 
+            left_join(coding.genes) %>%
+            filter(!is.na(hgnc_symbol))
+
+        .cols = c('chr',
+                  'transcript_start',
+                  'transcript_end',
+                  'transcription_start_site',
+                  'ensembl_gene_id',
+                  'hgnc_symbol',
+                  'tis',
+                  'trait',
+                  'z.ruv',
+                  'z.res',
+                  'p.val.ruv',
+                  'p.val.res',
+                  'q.val.ruv',
+                  'q.val.res',
+                  'beta.raw',
+                  'se.raw',
+                  'n',
+                  'percentage_gene_gc_content')
+
+        out.tab = .tab %>%
+            select_(.dots = .cols) %>%
+            arrange(chr, transcript_start) %>%
+            (function(x) { colnames(x)[1] = '#chr'; x })
+
+        raw.file = gsub('.bgz', '', out.file)
+        readr::write_tsv(out.tab, raw.file)
+        Rsamtools::bgzip(raw.file)
+        Rsamtools::indexTabix(out.file, 'bed')
+        log.msg('Built BED bgz: %s', out.file)
+        
+        if(file.exists(out.file)){
+            unlink(raw.file)
+        }
+
+    } else {
+        log.msg('File exists: %s', out.file)
+    }
+    return(0)
+}
+
+eqts.dir = 'share/eQTS_gtex_hg38/'
+
+.sink = list.dirs(eqts.dir, full.names = TRUE, recursive = FALSE) %>%
+    sapply(FUN = .combine.by.trait, out.dir = eqts.dir)
+################################################################
+```
+
+
+```{r RunClusterInd, include = FALSE}
+################################################################
+## Make clusters for individuals
+temp.data.file = 'result_gtex_prs_clust.rdata'
+
+if(!file.exists(temp.data.file)) {
+    M.tab = prs.data %>%
+        mutate(col = iid %&&% '@' %&&% fam) %>%
+        rename(row = trait, weight = mu) %>%
+        select(row, col, weight) %>%
+        tidyr::spread(key=row, value = weight)
+
+    kmeans =
+        M.tab[, -1, drop = FALSE] %>%
+        scale() %>%
+        (function(xx) { xx[xx > 3] = 3; xx[xx < -3] = -3; xx }) %>%
+        as.matrix() %>%
+        run.kmeans.cluster()
+    save(list=c('kmeans','M.tab'), file=temp.data.file)
+} else {
+    load(file=temp.data.file)
+}
+################################################################
+```
+
+```{r RunClusterGene, include = FALSE}
+################################################################
+## Make clusterss for genes
+temp.data.file = 'result_gtex_gene_clust.rdata'
+eqts.fdr.cutoff = 0.1
+
+if(!file.exists(temp.data.file)) {
+
+    .read <- function(ff) {
+        suppressMessages(readr::read_tsv(gzfile(ff)))
+    }
+    
+    .tab = list.files(path = eqts.dir, pattern = '.bed.bgz.tbi', full.names = TRUE) %>%
+        gsub(pattern='.tbi', replacement='') %>%
+        lapply(FUN = .read) %>%
+        bind_rows()
+
+    .genes.tis.sig = .tab %>%
+        filter(q.val.ruv < eqts.fdr.cutoff) %>%
+        select(ensembl_gene_id, tis) %>%
+        unique()
+
+    eqts.tab = .genes.tis.sig %>%
+        left_join(.tab)
+    
+    eqts.M.tab = eqts.tab %>%
+        mutate(col = ensembl_gene_id %&&% '@' %&&% tis) %>%
+        rename(row = trait, weight = z.ruv) %>%
+        select(row, col, weight) %>%
+        tidyr::spread(key = row, value = weight, fill = 0)
+
+    eqts.kmeans =
+        eqts.M.tab[, -1, drop = FALSE] %>%
+        scale() %>% 
+        (function(xx) { xx[xx > 5] = 5; xx[xx < -5] = -5; xx }) %>%
+        as.matrix() %>%
+        run.kmeans.cluster()
+
+    save(list=c('eqts.kmeans','eqts.M.tab','eqts.tab'), file=temp.data.file)
+
+} else {
+    load(file=temp.data.file)
+}
+```
+
+
+
+```{r}
+.neqts <- function(cutoff) {
+    eqts.tab %>% filter(q.val.ruv < cutoff) %>% select(ensembl_gene_id, tis) %>% unique() %>% nrow()
+}
+.neqts.gene <- function(cutoff) {
+    eqts.tab %>% filter(q.val.ruv < cutoff) %>% select(ensembl_gene_id) %>% unique() %>% nrow()
+}
+.neqts.tis <- function(cutoff) {
+    eqts.tab %>% filter(q.val.ruv < cutoff) %>% select(tis) %>% unique() %>% nrow()
+}
+```
+
+
+```{r}
+################################################################
+plot.t1.t2 <- function(t1, t2, join.key, prs.data) {
+
+    t1.data = prs.data %>% filter(trait == t1) %>% select(-trait)
+    t2.data = prs.data %>% filter(trait == t2) %>% select(-trait)
+    
+    .data = t1.data %>%
+        left_join(t2.data, by = join.key, suffix = c('.x', '.y'))
+
+    cor.mu.sig <- function(df, n) {
+        df = df[n, ]
+        x = rnorm(nrow(df), mean = df$mu.x, sd = df$sig.x)
+        y = rnorm(nrow(df), mean = df$mu.y, sd = df$sig.y)
+        return(cor(x, y))
+    }
+
+    boot.out = boot::boot(.data, cor.mu.sig, R=10000)
+
+    boot.ci = boot::boot.ci(boot.out, type = 'norm')
+
+    boot.name = sprintf('%.2f (%.2f, %.2f)',
+                        boot.ci$t0,
+                        boot.ci$normal[2],
+                        boot.ci$normal[3])
+
+    .aes = aes(x = mu.x,
+               xend = mu.x + sig.x,
+               y = mu.y,
+               ymin = mu.y - sig.y,
+               ymax = mu.y + sig.y,
+               yend = mu.y + sig.y)
+
+    .aes.1 = aes(x = mu.x, ymin = mu.y - sig.y, ymax = mu.y + sig.y)
+
+    .aes.2 = aes(x = mu.x - sig.x, xend = mu.x + sig.x,
+                 y = mu.y, yend = mu.y)
+
+    plt = .gg.plot(.data, aes(x = mu.x, y = mu.y)) +
+        xlab(t1) + ylab(t2) + ggtitle(boot.name) +
+        geom_linerange(.aes.1, size = .3, color = 'gray60') +
+        geom_segment(.aes.2, size = .3, color = 'gray60') +
+        geom_point(pch=21, color='gray20', fill = 'gray40', alpha=.7, size=.8) +
+        geom_smooth(method = 'lm', se=FALSE, size = .5,
+                    formula=y ~ x + 1,
+                    color = 'red')
+
+    list(plt = plt, boot.ci = boot.ci, boot.val = boot.ci$t0)
+}
+################################################################
+```
+
+
+```{r}
+################################################################
+## Plot either trait x gene or trait x individuals
+plot.cluster.data <- function(.kmeans, .mat, .trait,
+                              .scale = TRUE, .order.clust = FALSE,
+                              .lb = -3, .ub = 3) {
+    
+    col.tab = .mat[, 1] %>%
+        unlist(use.names = FALSE) %>%
+        (function(iid) data.frame(col = iid)) %>% 
+        mutate(k = .kmeans$clusters) %>%
+        arrange(k)
+
+    .names = colnames(.mat)
+
+    .df = .mat
+
+    if(.scale){
+        .df = .df %>%
+            (function(mm) data.frame(mm[, 1], scale(mm[, -1, drop = FALSE]))) %>%
+            (function(mm) { colnames(mm) = .names; mm })
+    }
+
+    .df = .df %>% 
+        tidyr::gather(key=row, value = mu, -col) %>%
+        mutate(row = factor(row, .trait$order, .trait$label)) %>%
+        left_join(col.tab) %>%
+        mutate(mu.trunc = pmin(pmax(mu, .lb), .ub))
+
+    plt = .gg.plot(.df, aes(y = row, x = col, fill = mu.trunc, color = mu.trunc)) +
+        theme(axis.text.x = element_blank()) +
+        theme(axis.ticks.x = element_blank()) +
+        theme(panel.background = element_rect(fill = 'gray90')) +
+        theme(plot.background = element_rect(fill = 'gray90')) +
+        theme(legend.position = 'bottom') +
+        facet_grid(. ~ k, scales = 'free', space = 'free') +
+        geom_tile()
+
+    return(plt)
+}
+################################################################
+```
+
+
+```{r}
+################################################################
+## Order traits
+order.traits <- function(.kmeans, .traits) {
+
+    .ro = row.order(.kmeans$centroids)
+    .C = .kmeans$centroids %r% .ro
+
+    .temp = apply(.C, MARGIN=2, FUN=which.max) %>%
+        order(decreasing = TRUE) %>%
+        (function(x) .traits[x])
+    
+    ret = tibble(order = .temp) %>%
+        mutate(temp = order) %>%
+        tidyr::separate('temp', c('cohort', 'trait'), sep = '_') %>%
+        mutate(label = toupper(trait) %&&% ' (' %&&% toupper(cohort) %&&% ')')
+
+    list(order = ret$order, label = ret$label, ko = .ro)
+}
+
+.remap.ko <- function(ko, clusters) {
+
+    .remap = tibble(k.old = ko) %>%
+        mutate(k = 1:n())
+
+    .remap = tibble(k.old = clusters) %>%
+        mutate(i = 1:n()) %>%
+        left_join(.remap) %>%
+        arrange(i)
+
+    ret = clusters
+    ret[.remap$i] = .remap$k
+    return(ret)
+}
+################################################################
+```
+
+
+```{r OrderTraits}
+traits = order.traits(eqts.kmeans, colnames(eqts.M.tab)[-1])
+eqts.kmeans$clusters = .remap.ko(traits$ko, eqts.kmeans$clusters)
+
+n.traits = length(traits$order)
+.idx = combn(1:n.traits, 2) %>% t()
+
+trait.pairs = data.frame(t1 = traits$order[.idx[, 1]],
+                         t2 = traits$order[.idx[, 2]],
+                         t1.name = traits$label[.idx[, 1]],
+                         t2.name = traits$label[.idx[, 2]])
+
+take.prs.pair <- function(pp) {
+    t1 = trait.pairs[pp, 't1']
+    t2 = trait.pairs[pp, 't2']
+    ret = plot.t1.t2(t1, t2, c('fam', 'iid'), prs.data)
+    return(ret)
+}
+
+n.ind = nrow(M.tab)
+n.ind.clust = nrow(kmeans$centroids)
+```
+
+## GWAS summary data
+
+We obtained publicly avaiable GWAS summary statistics from the three
+different sources:
+
+1. CTG: [Complex Trait Genetics Lab](https://ctg.cncr.nl/).
+2. PGC: [Psychiatric Genomics Consortium](https://www.med.unc.edu/pgc/).
+3. SSGAC: [Social Science Genetic Association Consortium](https://www.thessgac.org/).
+
+Of all the traits, we investigate on the GWAS data collected from
+individuals of European ancestry, and summary statistics complete with
+both effect sizes and standard errors.
+
+* AD (CTG): Alzheimer's disease case/control [@Jansen2018-ss]
+* DEPRESSED-A (CTG): depressed affect (of neuroticism) case/control [@Nagel2018-ho]
+* WORRY (CTG): Worry (of neuroticism) case/control [@Nagel2018-ho]
+* INSOMNIA (CTG): Insomnia case/control [@Jansen2019-yo]
+* IQ (CTG): Intelligence meta-analysis across relevant phenotypes [@Savage2018-lj]
+* ADHD (PGC): Attention-deficit/hyperactivity disorder case/control [@Neale2010-mc]
+* ASD (PGC): Autism spectrum disorder case/control [@Autism_Spectrum_Disorders_Working_Group_of_The_Psychiatric_Genomics_Consortium2017-ey]
+* BIP (PGC): Bipolar disorder case/control [@Stahl2018-du]
+* MDD (PGC): Major depressive disorder case/control [@Wray2018-ie]
+* OCD (PGC): Obsessive-compulsive disorder case/control [@International_Obsessive_Compulsive_Disorder_Foundation_Genetics_Collaborative_IOCDF-GC_and_OCD_Collaborative_Genetics_Association_Studies_OCGAS2018-lu]
+* PTSD (PGC): Post-traumatic stress disorder case/control [@Duncan2018-pd]
+* SCZ (PGC): Schizophrenia case/control [@Schizophrenia_Working_Group_of_the_Psychiatric_Genomics_Consortium2014-ro]
+* COG (SSGAC): cognitive performance [@Lee2018-ls]
+* EDU (SSGAC): educational attainment [@Lee2018-ls]
+* EVER-SMOKE (SSGAC): Ever smoker case/control meta-analysis of TAG consortium with UK Biobank [@Karlsson_Linner2019-cl]
+* SPEEDING (SSGAC): Automobile speeding propensity in UK Biobank [@Karlsson_Linner2019-cl]
+* NDRINK-WEEK (SSGAC): Number of drinks per week in UK Biobank [@Karlsson_Linner2019-cl]
+* NSEX-PART (SSGAC): Number of sexual partners in UK Biobank [@Karlsson_Linner2019-cl]
+* RISK-PC1 (SSGAC): The first principle components of the four risky behaviors [@Karlsson_Linner2019-cl]
+* RISK-TOL (SSGAC): Risk tolerance [@Karlsson_Linner2019-cl]
+
+
+## Calculation of polygenic risk score from summary statistics
+
+From the following summary-based multivariate regression analysis, we estimate multivariate effect sizes of the underlying GWAS statistics:
+
+$$\mathbf{z}_{t} \sim \mathcal{N}\!\left(R \boldsymbol{\theta}_{t}, R\right)$$ 
+
+where we estimate the LD matrix $R$ using UK10K cohorts, and we assume sparse Bayesian prior $\theta_{jt} \sim \pi \mathcal{N}\!\left(\theta_{jt}| 0, \tau^{2} \right) + (1-\pi) \delta_{0}(\theta_{jt})$.  Since these traits share samples (especially controls) across studies, it is crucial to account for unwanted non-genetic correlation.  We remove confounding factors by our previous method, [`RUV-z`](https://doi.org/10.1101/531673).  The trained multivariate effect sizes mapped on the hg38 coordinates are available for download.
+
+Once we establish the posterior distribution $p(\boldsymbol{\theta}_{t}|\mathbf{z}_{t})$ for each trait $t$, it is straightforward to estimate the polygenic risk of the trait on new GTEx cohort genotype matrix $\hat{X}$:
+
+$$\hat{y}_{it} \gets \sum_{j = 1}^{p} \hat{X}_{ij} \theta_{jt}$$
+
+Since we use fully factored variational approximation, $q$, we can easily characterize the distribution of $\hat{\mathbf{y}}_{t} \sim \mathcal{N}\!\left(\boldsymbol{\mu}_{t}, \Sigma_{t}\right)$ with $\boldsymbol{\mu}_{t} = \hat{X} \mathbb{E}_{q}\!\left[\boldsymbol{\theta}_{t}\right]$ and $\Sigma_{t} = \hat{X}^{\top} \mathbb{V}_{q}\!\left[\boldsymbol{\theta}_{t}\right] \hat{X}$.
+
+
+### The estimated polygenic scores recapitulate known genetic correlation patterns across traits
+
+```{r TakePRSPair, include = FALSE}
+################################################################
+temp.data.file = 'result_gtex_prs_pair.rdata'
+
+if(!file.exists(temp.data.file)) {
+    prs.pair.data = lapply(1:nrow(trait.pairs), take.prs.pair)
+    save(list = 'prs.pair.data', file = temp.data.file)
+} else {
+    load(temp.data.file)
+}
+################################################################
+```
+
+We project the `r length(prs.files)` polygenic risk models onto `r n.ind` GTEx individuals with genotype information.  Although there is no known neuro-psychiatric disorders for these individuals, correlation between two projected PRS can be equivalent as genetic correlation measured on LD matrix trained on the GTEx cohort.
+
+```{r FigGTExTraitCor, fig.cap=FIG.CAP, fig.width=4, fig.height=4}
+################################################################
+cor.pair.tab = lapply(1:nrow(trait.pairs), function(ii) {
+    data.frame(trait.pairs[ii, 3:4],
+               cor = prs.pair.data[[ii]]$boot.val,
+               cor.lb = prs.pair.data[[ii]]$boot.ci$normal[2],
+               cor.ub = prs.pair.data[[ii]]$boot.ci$normal[3])
+}) %>%
+    bind_rows()
+
+.diag = data.frame(t1.name = traits$label,
+                   t2.name = traits$label,
+                   cor = 1, cor.lb = 1, cor.ub = 1)
+
+cor.pair.tab = bind_rows(cor.pair.tab, .diag) %>% 
+    mutate(t1.name = factor(t1.name, traits$label)) %>% 
+    mutate(t2.name = factor(t2.name, traits$label))
+
+.aes = aes(x = t1.name, y = t2.name,
+           fill = cor, size = abs(cor))
+
+plt = .gg.plot(cor.pair.tab, .aes) +
+    theme(axis.text.x = element_text(angle=80, vjust=0, hjust = 0)) +
+    theme(legend.position = c(1,0), legend.justification = c(1,0)) +
+    theme(legend.direction = 'horizontal') +
+    geom_point(pch = 22) +
+    scale_x_discrete(position='top') +
+    scale_size_continuous(range=c(0,4), guide=FALSE) +
+    scale_fill_gradientn('correlation ', colors=c('blue','white','yellow')) +
+    xlab('Traits') +
+    ylab('Traits')
+
+print(plt)
+
+.gg.save(plot=plt, filename=fig.dir %&&% '/FigGTExTraitCor.pdf',
+         width=4, height=4)
+
+FIG.CAP = '**Fig.** The projected PRS profiles manifest genetic correlation across traits.'
+################################################################
+```
+
+[PDF](Fig/gtex/FigGTExTraitCor.pdf)
+
+As a proof of concept, we find strong correlation between the
+cognitive performance (COG) and intelligence (IQ) phenotypes.
+
+```{r FigGTExTraitCor_IQ_COG, fig.cap=FIG.CAP, fig.width=3, fig.height=3}
+################################################################
+.rr = trait.pairs %>%
+    mutate(r = 1:n()) %>% 
+    filter(t1=='ctg_iq',t2=='ssgac_cog')
+
+plt = prs.pair.data[[.rr$r]]$plt +
+    xlab(.rr$t1.name) + ylab(.rr$t2.name)
+
+print(plt)
+.gg.save(plot=plt,
+         filename=fig.dir %&&% '/FigGTExTraitCor_IQ_COG.pdf',
+         width=4, height=4)
+
+FIG.CAP = '**Fig.** Strongly positive genetic correlation between two traits--inteligence and cognitive performance. The first number in the title denotes Pearson correlation between the traits; the following numbers indiciate bootstrapped 95% confidencen interval; each dot respresent one individual in the GTEx cohort; the error bars mark 1 standard deviation of PGS estimation.'
+################################################################
+```
+
+[PDF](Fig/gtex/FigGTExTraitCor_IQ_COG.pdf)
+
+In consistency with previous findings [@Karlsson_Linner2019-cl], genetically, people showing risk-taking behaviors tend to become less likely to suffer from neuroticism (less depressed and less worrying).
+
+```{r FigGTExTraitCor_RISK_DEPRESS, fig.cap=FIG.CAP, fig.width=3, fig.height=3}
+################################################################
+.rr = trait.pairs %>%
+    mutate(r = 1:n()) %>% 
+    filter(t1=='ssgac_risk-pc1',t2=='ctg_depressed-a')
+
+plt = prs.pair.data[[.rr$r]]$plt +
+    xlab(.rr$t1.name) + ylab(.rr$t2.name)
+
+print(plt)
+.gg.save(plot=plt,
+         filename=fig.dir %&&% '/FigGTExTraitCor_RISK_DEPRESS.pdf',
+         width=4, height=4)
+
+FIG.CAP = '**Fig.** Negative genetic correlation between the risk-taking behavior and depressed affection (of neuroticism). The first number in the title denotes Pearson correlation between the traits; the following numbers indiciate bootstrapped 95% confidencen interval; each dot respresent one individual in the GTEx cohort; the error bars mark 1 standard deviation of PGS estimation.'
+################################################################
+```
+
+[PDF](Fig/gtex/FigGTExTraitCor_RISK_DEPRESS.pdf)
+
+
+```{r FigGTExTraitCor_SPEEDING_WORRY, fig.cap=FIG.CAP, fig.width=3, fig.height=3}
+################################################################
+.rr = trait.pairs %>%
+    mutate(r = 1:n()) %>% 
+    filter(t1=='ssgac_speeding',t2=='ctg_worry')
+
+plt = prs.pair.data[[.rr$r]]$plt +
+    xlab(.rr$t1.name) + ylab(.rr$t2.name)
+
+print(plt)
+.gg.save(plot=plt,
+         filename=fig.dir %&&% '/FigGTExTraitCor_SPEEDING_WORRY.pdf',
+         width=4, height=4)
+
+FIG.CAP = '**Fig.** Negative genetic correlation between the propensity of automobic speeding and worrying affection (of neuroticism). The first number in the title denotes Pearson correlation between the traits; the following numbers indiciate bootstrapped 95% confidencen interval; each dot respresent one individual in the GTEx cohort; the error bars mark 1 standard deviation of PGS estimation.'
+################################################################
+```
+
+[PDF](Fig/gtex/FigGTExTraitCor_SPEEDING_WORRY.pdf)
+
+
+
+```{r FigGTExTraitCor_SCZ_COG, fig.cap=FIG.CAP, fig.width=3, fig.height=3}
+################################################################
+.rr = trait.pairs %>%
+    mutate(r = 1:n()) %>% 
+    filter(t1=='pgc_scz',t2=='ssgac_cog')
+
+plt = prs.pair.data[[.rr$r]]$plt +
+    xlab(.rr$t1.name) + ylab(.rr$t2.name)
+
+print(plt)
+.gg.save(plot=plt,
+         filename=fig.dir %&&% '/FigGTExTraitCor_SCZ_COG.pdf',
+         width=4, height=4)
+
+FIG.CAP = '**Fig.** Negative genetic correlation between the risk of schizophrenia and cognitive performance. The first number in the title denotes Pearson correlation between the traits; the following numbers indiciate bootstrapped 95% confidencen interval; each dot respresent one individual in the GTEx cohort; the error bars mark 1 standard deviation of PGS estimation.'
+################################################################
+```
+
+[PDF](Fig/gtex/FigGTExTraitCor_SCZ_COG.pdf)
+
+
+```{r FigGTExTraitCor_SCZ_WORRY, fig.cap=FIG.CAP, fig.width=3, fig.height=3}
+################################################################
+.rr = trait.pairs %>%
+    mutate(r = 1:n()) %>% 
+    filter(t1=='pgc_scz',t2=='ctg_worry')
+
+plt = prs.pair.data[[.rr$r]]$plt +
+    xlab(.rr$t1.name) + ylab(.rr$t2.name)
+
+print(plt)
+.gg.save(plot=plt,
+         filename=fig.dir %&&% '/FigGTExTraitCor_SCZ_WORRY.pdf',
+         width=4, height=4)
+
+FIG.CAP = '**Fig.** Positive genetic correlation between the risk of schizophrenia and worrying affection (of neuroticism). The first number in the title denotes Pearson correlation between the traits; the following numbers indiciate bootstrapped 95% confidencen interval; each dot respresent one individual in the GTEx cohort; the error bars mark 1 standard deviation of PGS estimation.'
+################################################################
+```
+
+[PDF](Fig/gtex/FigGTExTraitCor_SCZ_WORRY.pdf)
+
+
+
+
+### In the projected PGS profiles, `r num.int(n.ind)` individuals are classified into `r num.int(n.ind.clust)` clusters
+
+
+```{r FigGTExIndCluster, fig.cap=FIG.CAP, fig.width=6, fig.height=3.5}
+################################################################
+n.ind = nrow(M.tab)
+
+plt = plot.cluster.data(kmeans, M.tab, traits, .scale = FALSE, .lb = -2, .ub = 2)
+
+plt = plt +
+    xlab(n.ind %&&% ' individuals') +
+    ylab('Traits') +
+    theme(strip.text = element_text(size=6)) +
+    scale_fill_gradientn('PGS ', colors=c('#0000DD','white','yellow'))+
+    scale_color_gradientn('PGS ', colors=c('#0000DD','white','yellow'))
+
+print(plt)
+.gg.save(plot=plt,
+         filename=fig.dir %&&% '/FigGTExIndCluster.pdf',
+         width=6, height=3.5)
+FIG.CAP = '**Fig.** ' %&&% num.int(n.ind) %&&% ' individuals are classified into ' %&&% num.int(n.ind.clust) %&&% ' clusters based on genetic propensity of the mental health traits.'
+################################################################
+```
+
+[PDF](Fig/gtex/FigGTExIndCluster.pdf)
+
+
+While avoiding any over-interpretation of PGS, we may group individuals into sub-populations according to their genetic predisposition of mental health traits. Using simple `k-means` clustering method, we resolve `r num.int(n.ind.clust)` groups (`r num.round(n.ind / n.ind.clust)` individuals in each group).  Using the clustering results, we gain more detailed insights into pleiotropy.  For instance, we can characterize the four groups of individuals according to genetic propensity:
+
+* less adventurous (risk-taking) and less intelligent (\#1), possibly due to depression like the group \#5,
+* more adventurous and more intelligent (\#6), but more likely to develop neuropsychiatric problems.
+* less adventurous and more intelligent (\#7), 
+* and more risk-taking but less intelligent (\#10, \#13).
+
+We also find a group of individuals who have exceptionally healthy genetic background (\#12), and could be less likely to develop schizophrenia and depression with higher cognitive performance.
+
+
+### Expression Quantitative Trait Score (eQTS) analysis identifies `r num.int(.neqts.gene(.1))` genes are significantly correlated with genetic predisposition
+
+Using the PGS projected on the reference eQTL cohort, we identify target genes with straightforward correlation analysis with observed gene expression measurement. To avoid spurious association, we adjust top 10 principle components of the "control" genes that we establish by 1000 genes most weakly associated within each tissue [@Risso2014-st]. We find a list of `r .neqts(.1) %>% num.int()` gene-tissue pairs significantly correlated with PGS at FDR 10%, which consist of `r .neqts.gene(.1) %>% num.int()` genes across `r .neqts.tis(.1) %>% num.int()` tissues. At more stringent FDR 5%, we find `r .neqts(.05) %>% num.int()` unique gene-tissue pairs of `r .neqts.gene(.05) %>% num.int()` genes across `r .neqts.tis(.05) %>% num.int()` tissues.
+
+```{r FigGTExGeneQTSFreq, fig.cap=FIG.CAP, fig.width=5, fig.height=6}
+################################################################
+## Show numbers
+tis.freq.tab =
+    eqts.tab %>%
+    filter(q.val.ruv < .1) %>%
+    group_by(trait, tis) %>%
+    summarize(ngenes = length(unique(ensembl_gene_id))) %>%
+    ungroup()
+
+tis.freq.order = tis.freq.tab %>%
+    rename(col = tis, row = trait, weight = ngenes) %>%
+    order.pair()
+
+.rows = match(tis.freq.order$rows, traits$order) %>%
+    (function(rr) traits$label[rr])
+
+tis.freq.tab = tis.freq.tab %>% 
+    mutate(trait = factor(trait, tis.freq.order$rows, .rows)) %>% 
+    mutate(tis = factor(tis, tis.freq.order$cols))
+
+tis.color.tab = tibble(tissue_id = tis.freq.order$cols) %>%
+    mutate(idx = 1:n()) %>% 
+    (function(x) {
+        .colors = readr::read_tsv('gtex_colors.txt');
+        left_join(x, .colors, by = 'tissue_id');
+    }) %>%
+    mutate(hex = '#' %&&% tissue_color_hex) %>%
+    arrange(idx)
+        
+.color.hex = unlist(tis.color.tab$hex, use.names=FALSE)
+
+.aes = aes(x = trait, y = tis, size = ngenes, fill = tis)
+
+plt = .gg.plot(tis.freq.tab, .aes) +
+    xlab('Traits') +
+    ylab('Tissues') +
+    theme(axis.text.x = element_text(angle = 80, vjust=0, hjust=0)) +
+    geom_point(pch = 22) +
+    scale_x_discrete(position = 'top') +
+    scale_fill_manual(values = .color.hex, guide = FALSE) +
+    scale_size_continuous('#genes', range = c(1, 4), trans = 'log10')
+
+print(plt)
+
+.gg.save(plot=plt,
+         filename=fig.dir %&&% '/FigGTExGeneQTSFreq.pdf',
+         width=5, height=6)
+
+FIG.CAP = '**Fig.** We find ' %&&% (.neqts(.1) %>% num.int()) %&&%' gene-tissue pairs significantly correlated with polygenic risk scores at FDR 10%, which consist of ' %&&% (.neqts.gene(.1) %>% num.int()) %&&% ' genes across ' %&&% (.neqts.tis(.1) %>% num.int()) %&&% ' tissues.'
+################################################################
+```
+
+[PDF](Fig/gtex/FigGTExGeneQTSFreq.pdf)
+
+
+### Straightforward enrichment analysis reveals pathways perturbed by genetic risk score
+
+
+```{r FuncPlotAnnot, include = FALSE}
+plot.annot.heatmap <- function(.file = 'share/annotation_gtex_hg38/ctg_ad.txt.gz',
+                               .subcat = 'CP:KEGG',
+                               .n.top = 30,
+                               .qval.cutoff = .1) {
+
+    annot.tab = readr::read_tsv(.file, col_types = 'cddddciddc') %>%
+        mutate(qval = p.adjust(pval, method='BH'))
+    
+    .gs = annot.tab %>%
+        filter(qval < .qval.cutoff) %>%
+        filter(gs_subcat == .subcat) %>%
+        group_by(gs_name) %>%
+        slice(which.min(pval)) %>% 
+        ungroup() %>%
+        top_n(.n.top, 1 - pval) %>%
+        select(gs_name) %>%
+        unlist(use.names = FALSE)
+
+    .tab = annot.tab %>% filter(gs_name %in% .gs)
+
+    .order = .tab %>%
+        mutate(weight = -log10(pval)) %>% 
+        select(gs_name, tis, weight) %>%
+        rename(row = gs_name, col = tis) %>% 
+        order.pair()
+
+    .tab = .tab %>%
+        mutate(gs_name = factor(gs_name, .order$rows)) %>%
+        mutate(tis = factor(tis, .order$cols)) %>%
+        mutate(qval = -log10(qval)) %>%
+        mutate(z = (z - null.mean)/null.sd) %>%
+        mutate(z = pmax(z, -4)) %>% 
+        mutate(z = pmin(z, 4))
+
+    .gg.plot(.tab, aes(x = tis, y = gs_name, fill = z, size = pmin(qval, 4))) +
+        scale_x_discrete(position = 'top') +
+        scale_fill_gradientn('z-score ', colors=c('#8888DD','white','#DD8888')) +
+        scale_size_continuous('-log10 q-value ', range=c(1,3), limits = c(1, 4)) +
+        theme(axis.text.x = element_text(angle=80, vjust=0, hjust=0)) +
+        geom_point(pch = 22, color = 'gray50') +
+        xlab('Tissues') + ylab('Pathways') +
+        theme(legend.position = 'bottom')
+}
+```
+
+
+```{r FigADGTExKEGG, fig.cap=FIG.CAP, fig.width=7, fig.height=8}
+plt = plot.annot.heatmap('share/annotation_gtex_hg38/ctg_ad.txt.gz',
+                   'CP:KEGG',
+                   .n.top = 50,
+                   .qval.cutoff = .1)
+print(plt)
+.gg.save(plot=plt, filename=fig.dir %&&% '/FigADGTExKEGG.pdf',
+         width=7, height=8)
+FIG.CAP = '**Fig.** Pathay analysis for Alzheimers Disease eQTS with GTEx tissues. [PDF version](Fig/gtex/FigADGTExKEGG.pdf)'
+```
+
+```{r FigSCZGTExKEGG, fig.cap=FIG.CAP, fig.width=7, fig.height=8}
+plt = plot.annot.heatmap('share/annotation_gtex_hg38/pgc_scz.txt.gz',
+                   'CP:KEGG',
+                   .n.top = 50,
+                   .qval.cutoff = .1)
+print(plt)
+.gg.save(plot=plt, filename=fig.dir %&&% '/FigSCZGTExKEGG.pdf',
+         width=7, height=8)
+FIG.CAP = '**Fig.** Pathay analysis for Schizophrenia eQTS with GTEx tissues. [PDF version](Fig/gtex/FigSCZGTExKEGG.pdf)'
+```
+
+
+```{r FigBIPGTExKEGG, fig.cap=FIG.CAP, fig.width=7, fig.height=8}
+plt = plot.annot.heatmap('share/annotation_gtex_hg38/pgc_bip.txt.gz',
+                   'CP:KEGG',
+                   .n.top = 50,
+                   .qval.cutoff = .1)
+print(plt)
+.gg.save(plot=plt, filename=fig.dir %&&% '/FigBIPGTExKEGG.pdf',
+         width=7, height=8)
+FIG.CAP = '**Fig.** Pathay analysis for Bipolar Disorder eQTS with GTEx tissues. [PDF version](Fig/gtex/FigBIPGTExKEGG.pdf)'
+```
+
+
+```{r FigIQGTExKEGG, fig.cap=FIG.CAP, fig.width=7, fig.height=8}
+plt = plot.annot.heatmap('share/annotation_gtex_hg38/ctg_iq.txt.gz',
+                   'CP:KEGG',
+                   .n.top = 50,
+                   .qval.cutoff = .1)
+print(plt)
+.gg.save(plot=plt, filename=fig.dir %&&% '/FigIQGTExKEGG.pdf',
+         width=7, height=8)
+FIG.CAP = '**Fig.** Pathay analysis for Intelligence eQTS with GTEx tissues. [PDF version](Fig/gtex/FigIQGTExKEGG.pdf)'
+```
+
+
+```{r FigDepressedGTExKEGG, fig.cap=FIG.CAP, fig.width=7, fig.height=8}
+plt = plot.annot.heatmap('share/annotation_gtex_hg38/ctg_depressed-a.txt.gz',
+                   'CP:KEGG',
+                   .n.top = 50,
+                   .qval.cutoff = .1)
+print(plt)
+.gg.save(plot=plt, filename=fig.dir %&&% '/FigDepressedGTExKEGG.pdf',
+         width=7, height=8)
+FIG.CAP = '**Fig.** Pathay analysis for Depression eQTS with GTEx tissues. [PDF version](Fig/gtex/FigDepressedGTExKEGG.pdf)'
+```
+
+
+
+```{r FigWorryGTExKEGG, fig.cap=FIG.CAP, fig.width=7, fig.height=8}
+plt = plot.annot.heatmap('share/annotation_gtex_hg38/ctg_worry.txt.gz',
+                   'CP:KEGG',
+                   .n.top = 50,
+                   .qval.cutoff = .1)
+print(plt)
+.gg.save(plot=plt, filename=fig.dir %&&% '/FigWorryGTExKEGG.pdf',
+         width=7, height=8)
+FIG.CAP = '**Fig.** Pathay analysis for Worry eQTS with GTEx tissues. [PDF version](Fig/gtex/FigWorryGTExKEGG.pdf)'
+```
+
+
+### Clustering significant eQTS genes
+
+
+```{r FigGTExGeneCluster, fig.cap=FIG.CAP, fig.width=6, fig.height=3.5}
+################################################################
+n.gene.tis = dim(eqts.M.tab)
+n.genes = eqts.tab %>% select(ensembl_gene_id) %>% unique() %>% nrow()
+
+.xlab = n.gene.tis %&&% ' gene-tissue pairs (' %&&%
+    n.genes %&&% ' genes at FDR < ' %&&%
+    eqts.fdr.cutoff %&&% ')'
+
+plt = plot.cluster.data(eqts.kmeans, eqts.M.tab, traits,
+                        .scale = FALSE, .order.clust = TRUE,
+                        .lb = -5, .ub = 5)
+
+plt = plt + xlab(.xlab) + ylab('Traits') +
+    theme(strip.text = element_text(size=6)) +
+    scale_fill_gradientn('eQTS effect ', colors=c('#0000DD','white','yellow')) +
+    scale_color_gradientn('eQTS effect ', colors=c('#0000DD','white','yellow'))
+
+print(plt)
+
+.gg.save(plot=plt, filename=fig.dir %&&% '/FigGTExGeneCluster.pdf',
+         width=6, height=3.5)
+FIG.CAP = ''
+################################################################
+```
+
+[PDF](Fig/gtex/FigGTExGeneCluster.pdf)
+
+
+```{r eQTS_Membership, include = FALSE}
+.sep = c('ensembl_gene_id','tis')
+membership.tab = eqts.M.tab %>%
+    select(col) %>%
+    tidyr::separate('col', .sep, sep='@') %>%
+    mutate(group = as.integer(eqts.kmeans$clusters))
+eqts.out = membership.tab %>% 
+    left_join(eqts.tab) %>% 
+    filter(q.val.ruv < .1) %>%
+    ungroup()
+```
+
+TODO
+
+```{r TopeQTS, as.is=TRUE}
+
+.tab = tibble(trait = traits$order, trait.name = traits$label)
+
+.write.tab = eqts.out %>%
+    group_by(group) %>%
+    top_n(3, abs(z.ruv)) %>%
+    ungroup() %>%
+    arrange(group) %>%
+    left_join(.tab) %>% 
+    select(group,
+           `#chr`,
+           transcription_start_site,
+           hgnc_symbol,
+           trait.name,
+           z.ruv, p.val.ruv, q.val.ruv, tis) %>% 
+    mutate(transcription_start_site = num.int(transcription_start_site)) %>% 
+    mutate(p.val.ruv = num.sci(p.val.ruv)) %>% 
+    mutate(q.val.ruv = num.sci(q.val.ruv)) %>% 
+    rename(chr = `#chr`,
+           tss = transcription_start_site,
+           gene = hgnc_symbol,
+           trait = trait.name,
+           z = z.ruv,
+           pvalue = p.val.ruv,
+           qvalue = q.val.ruv,
+           tissue = tis)
+    
+.tis.colors = match(.write.tab$tissue, tis.color.tab$tissue_id) %>%
+    (function(rr) tis.color.tab[rr, ]$hex)
+
+.write.tab %>% 
+    flextable::flextable() %>%
+    flextable::theme_vanilla() %>% 
+    flextable::fontsize(size = 9, part = 'body') %>% 
+    flextable::merge_v(j = 'group') %>% 
+    flextable::autofit() %>% 
+    flextable::color(i = ~ z > 0, j = c(6), color = 'red') %>% 
+    flextable::color(i = ~ z < 0, j = c(6), color = 'blue') %>% 
+    flextable::color(j = 'tissue', color = .tis.colors) %>% 
+    flextable::align(align='center', part = 'header') %>% 
+    flextable::align(j='group', align='left')
+```
+
+TODO
+
+```{r TopeQTSTrait, as.is=TRUE}
+.tab = tibble(trait = traits$order, trait.name = traits$label)
+
+.write.tab = eqts.out %>%
+    group_by(trait) %>%
+    top_n(3, abs(z.ruv)) %>%
+    ungroup() %>%
+    arrange(trait) %>%
+    left_join(.tab) %>% 
+    select(trait.name,
+           `#chr`,
+           transcription_start_site,
+           hgnc_symbol,
+           z.ruv, p.val.ruv, q.val.ruv, tis) %>% 
+    mutate(transcription_start_site = num.int(transcription_start_site)) %>% 
+    mutate(p.val.ruv = num.sci(p.val.ruv)) %>% 
+    mutate(q.val.ruv = num.sci(q.val.ruv)) %>% 
+    rename(chr = `#chr`,
+           tss = transcription_start_site,
+           gene = hgnc_symbol,
+           trait = trait.name,
+           z = z.ruv,
+           pvalue = p.val.ruv,
+           qvalue = q.val.ruv,
+           tissue = tis)
+    
+.tis.colors = match(.write.tab$tissue, tis.color.tab$tissue_id) %>%
+    (function(rr) tis.color.tab[rr, ]$hex)
+
+.write.tab %>% 
+    flextable::flextable() %>%
+    flextable::theme_vanilla() %>% 
+    flextable::fontsize(size = 9, part = 'body') %>% 
+    flextable::merge_v(j = 'trait') %>% 
+    flextable::autofit() %>% 
+    flextable::color(i = ~ z > 0, j = 5, color = 'red') %>% 
+    flextable::color(i = ~ z < 0, j = 5, color = 'blue') %>% 
+    flextable::color(j = 'tissue', color = .tis.colors) %>% 
+    flextable::align(align='center', part = 'header')
+
+```
+
+TODO
+
+
+# Downloads
+
+## GWAS multivariate effect size
+
+GWAS multivariate univariate and multivariate effect sizes are available in each file.
+
+```{r Download_effect, results='asis'}
+.list.effect <- function(...) {
+    .tbi = list.files(...,
+                      pattern = '.bed.gz.tbi',
+                      full.names = TRUE)
+    .tbi %>%
+        sapply(FUN=gsub, pattern='.tbi', replacement='')
+}
+
+.fun = function(vv) {
+    ss = basename(vv) %>%
+        gsub(pattern='.bed.gz',replacement='') %>%
+        toupper() %>% 
+        strsplit(split='_') %>%
+        (function(s) s[[1]])
+    sprintf('* %s %s [BED](%s) [TBI](%s.tbi)', ss[1], ss[2], vv, vv)
+}
+effect.files = .list.effect('share/Effect_HG38')
+cat(sapply(effect.files, .fun) %>%
+    paste(collapse='\n'))
+cat('\n')
+```
+
+## Association statistics for expression Quantitative Trait Score on GTEx tissues
+
+The full results of expression quantitative trait polygenic score (eQTS) can be downloaded:
+
+```{r Download_eQTS, results='asis'}
+################################################################
+bed.files = list.files(path = eqts.dir, pattern = '.bed.bgz.tbi', full.names = TRUE) %>%
+    gsub(pattern='.tbi', replacement='')
+
+.fun = function(vv) {
+    ss = basename(vv) %>%
+        gsub(pattern='.bed.bgz',replacement='') %>%
+        toupper() %>% 
+        strsplit(split='_') %>%
+        (function(s) s[[1]])
+    sprintf('* %s %s [BED](%s) [TBI](%s.tbi)', ss[1], ss[2], vv, vv)
+}
+
+sapply(bed.files, .fun) %>%
+    paste(collapse='\n') %>% 
+    cat()
+
+cat('\n')
+################################################################
+```
+
+Each row correspond to each gene-tissue pair with the following columns:
+
+* `#chr`: chromosome name
+* `transcript_start`: transcription start (left-most of all the gene model)
+* `transcript_end`: transcription end (left-most of all the gene model)
+* `transcription_start_site`: transcription start site (average over all the gene model)
+* `ensembl_gene_id`: unique ENSEMBL gene id
+* `hgnc_symbol`: gene symbol
+* `tis`: tissues
+* `trait`: GWAS traits 
+* `z.ruv`: eQTS z-score after RUV (removing 10 PCs trained on tissue-specific control genes)
+* `z.res`: eQTS z-score after adjusting GTEx PEER factors (recommended for _cis_-eQTL analysis, but stringent and potentially over-correcting)
+* `p.val.ruv`: p-value for the `z.ruv`
+* `p.val.res`: p-value for the `z.res`
+* `q.val.ruv`: q-value for the `z.ruv`
+* `q.val.res`: q-value for the `z.res`
+* `beta.raw`: raw eQTS effect size without any confounder correction
+* `se.raw`: raw eQTS standard error
+* `n`: number of samples
+* `percentage_gene_gc_content`: G/C content for the gene
+
+## Full gene-set analysis results
+
+Each row summarizes gene-set analysis for one at a time:
+
+* `gs_name`: gene-set name
+* `z`: observed z-score
+* `null.mean`: mean z-score under the sample permutation
+* `null.sd`: standard deviation under the sample permutation
+* `pval`: permutation test p-value
+* `gs_subcat`: sub-category for the gene-set 
+* `n`: number of samples in gene expression data
+* `gc`: average of gene-level G/C content
+* `len`: average of gene length within this gene-set
+* `tis`: GTEx tissue
+* `qval`: q-value by [Benjamni-Hochberg](https://www.jstor.org/stable/2346101)
+
+Files:
+
+```{r Download_Enrichment, results='asis'}
+.list.enrichment <- function(...) {
+    list.files(...,
+               pattern = '.txt.gz',
+               full.names = TRUE)
+}
+.fun = function(vv) {
+    ss = basename(vv) %>%
+        gsub(pattern='.txt.gz',replacement='') %>%
+        toupper()
+    sprintf('* %s [TXT](%s)', ss, vv)
+}
+effect.files = .list.enrichment('share/annotation_gtex_hg38')
+cat(sapply(effect.files, .fun) %>%
+    paste(collapse='\n'))
+cat('\n')
+```
+
+
+# References
+
