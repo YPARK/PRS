@@ -19,12 +19,21 @@ log.msg <- function(...) {
     flush(stderr())
 }
 
+load.data <- function(fileName){
+    load(fileName)
+    mget(ls()[ls() != "fileName"])
+}
+
 RNORM <- function(d1, d2) {
     matrix(rnorm(d1 * d2), nrow = d1, ncol = d2)
 }
 
-################################################################
-## clean potential genetic signals
+
+#' @param plink.hdr
+#' @param chr
+#' @param plink.lb
+#' @param plink.ub
+#' @param temp.dir
 subset.plink <- function(plink.hdr, chr, plink.lb, plink.ub, temp.dir) {
 
     require(dplyr)
@@ -218,4 +227,55 @@ calc.qtl.stat <- function(xx, yy, se.min = 1e-8, verbose = FALSE) {
         dplyr::mutate(y.col = as.integer(y.col))
 
     return(out.tab)
+}
+
+################################################################
+#' @param genes a vector of gene names
+read.gene.info <- function(genes) {
+
+    ensembl = biomaRt::useMart(biomart="ENSEMBL_MART_ENSEMBL",
+                               host="grch37.ensembl.org",
+                               path="/biomart/martservice",
+                               dataset="hsapiens_gene_ensembl")
+
+    ensembl.hs = biomaRt::useDataset("hsapiens_gene_ensembl",mart=ensembl)
+
+    .attr = c("hgnc_symbol",
+              "chromosome_name",
+              "transcription_start_site",
+              "transcript_start",
+              "transcript_end")
+
+    .dt = biomaRt::getBM(attributes=.attr,
+                         filters="hgnc_symbol",
+                         values=genes,
+                         mart=ensembl.hs) %>%
+        as.data.table
+
+    info.tab = .dt[, .(tss=min(transcript_start),
+                      tes=max(transcript_end)),
+                  by=.(hgnc_symbol, chromosome_name)]
+
+    return(info.tab)
+}
+
+#' @param .tab
+#' @param info.tab
+annotate.gene.tab <- function(.tab, info.tab) {
+
+    .name.dt = tibble(hgnc_symbol = rownames(.tab)) %>%
+        mutate(r = 1:n()) %>%
+        left_join(info.tab, by = "hgnc_symbol") %>%
+        na.omit()
+
+    rr = .name.dt$r
+
+    .name.dt = .name.dt %>%
+        dplyr::select(chromosome_name, tss, tes, hgnc_symbol) %>%
+        as.data.table
+
+    ret = cbind(.name.dt, .tab[rr, ]) %>%
+        dplyr::filter(chromosome_name %in% 1:22) %>%
+        arrange(chromosome_name, tss) %>%
+        rename(`#chr` = chromosome_name)
 }

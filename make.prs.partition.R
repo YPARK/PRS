@@ -2,7 +2,7 @@
 
 argv = commandArgs(trailingOnly = TRUE)
 
-if(length(argv) != 4) {
+if(length(argv) < 7) {
     q()
 }
 
@@ -10,19 +10,26 @@ source('Util.R')
 library(tidyverse)
 library(data.table)
 
-PLINK.DIR = argv[1]              # e.g., PLINK.DIR = "data/Ruzicka_Plink/"
-LD.FILE   = argv[2]              # e.g., LD.FILE = "LD.info.txt"
-GWAS.FILE = argv[3]              # e.g., GWAS.FILE = "data/GWAS/ssgac_speeding.bed.gz"
-OUT.FILE  = argv[4]              # e.g., OUT.FILE = "out.txt.gz"
+PLINK.DIR = argv[1]            # e.g., "data/Ruzicka_Plink/"
+LD.FILE = argv[2]              # e.g., "LD.info.txt"
+GWAS.FILE = argv[3]            # e.g., "data/GWAS/clozuk_scz.bed.gz"
+ANNOT.FILE = argv[4]           # e.g., "data/gene_annot_limma_pval.tab.gz"
+CUTOFF = as.numeric(argv[5])   # e.g., 3
+CIS.DIST = as.numeric(argv[6]) # e.g., 1e5
+OUT.FILE = argv[7]             # e.g.,  "out.txt.gz"
+
+################################################################
+
+annot.pval.tab = read_tsv(ANNOT.FILE) %>%
+    gather(key="celltype", value="pval",
+           -`#chr`, -tss, -tes, -hgnc_symbol) %>%
+    filter(pval > CUTOFF) %>%
+    mutate(lb = pmax(tss - CIS.DIST, 0)) %>%
+    mutate(ub = tes + CIS.DIST)
+
+effect.tab = fread(GWAS.FILE)
 
 REF.PLINK.DIR = "data/1KG_EUR/"
-
-if(file.exists(OUT.FILE)) {
-    log.msg("File exists: %s", OUT.FILE)
-    q()
-}
-
-dir.create(dirname(OUT.FILE), recursive=TRUE, showWarning=FALSE)
 
 ################################################################
 TEMP.DIR = ('temp_' %&&% OUT.FILE %&&% '_' %&&% GWAS.FILE) %>%
@@ -58,6 +65,7 @@ if(!("snp.loc" %in% .names)){
 
 effect.tab = effect.tab[]
 
+
 #' @param .svd SVD result
 #' @param tau regularization parameter
 take.DinvVt <- function(.svd, tau) {
@@ -83,7 +91,6 @@ pred.prs <- function(.svd, zz, tau) {
     W.t = take.DinvVt(.svd, tau)
     .svd$U %*% (W.t %*% zz)
 }
-
 
 #' Local polygenic score prediction with regularization parameter
 #' tau tuned by cross-comparison with additional genotype matrix
@@ -130,15 +137,25 @@ pred.prs.cv <- function(zz, X, X.test){
     list(y = y.opt, tau = tau.opt, cor = 1 - opt.out$value)
 }
 
+#' @param .snps tab with beta, se
+take.z.vector <- function(.snps) {
+    .snps %>%
+        mutate(z = beta/se) %>%
+        select(z) %>%
+        as.matrix()
+}
+
+
 #' Build PRS within r-th local LD block
 #' @param r index
 #' @return risk score with iid
-take.prs.ld <- function(r) {
+take.prs.ld.ct <- function(r) {
 
     .chr = ld.tab[r, "chr"]
     .chr.num = str_remove(.chr, "chr") %>% as.integer()
     .lb = ld.tab[r, "start"]
     .ub = ld.tab[r, "stop"]
+
 
     .effect.1 = effect.tab[chr == .chr & snp.loc >= .lb & snp.loc <= .ub]
     .effect.2 = effect.tab[chr == .chr.num & snp.loc >= .lb & snp.loc <= .ub]
@@ -148,22 +165,18 @@ take.prs.ld <- function(r) {
 
     log.msg("Take an LD block: %d SNPs", nrow(.effect))
 
-    if(nrow(.effect) == 0) return(list(cor = NA))
 
     .plink = subset.plink(PLINK.DIR %&% "/" %&% .chr, .chr, .lb, .ub, TEMP.DIR)
+
     .plink.ref = subset.plink(REF.PLINK.DIR %&% "/" %&% .chr, .chr, .lb, .ub, TEMP.DIR)
 
     log.msg("Read genotypes: n=%d, n=%d", nrow(.plink$BED), nrow(.plink.ref$BED))
 
     .matched = match.plink(.plink, .plink.ref)
-
     .plink = .matched$lhs
     .plink.ref = .matched$rhs
 
     log.msg("After matching --> n=%d, n=%d", nrow(.plink$BED), nrow(.plink.ref$BED))
-
-    if(is.null(.plink)) return(list(cor = NA))
-    if(is.null(.plink.ref)) return(list(cor = NA))
 
     valid.snps = .plink$BIM %>%
         select(-missing, -rs) %>%
@@ -193,28 +206,66 @@ take.prs.ld <- function(r) {
 
     stopifnot(nrow(X) == nrow(.plink$FAM))
 
-    zz = valid.snps %>%
-        mutate(z = beta/se) %>%
-        select(z) %>%
-        as.matrix()
+    zz = take.z.vector(valid.snps)
+    prs.tot = pred.prs.cv(zz, X, X.ref)
 
-    out = pred.prs.cv(zz, X, X.ref)
-    out$y[, iid := .iid$iid]
-    out$iid = .iid
-    return(out)
+    prs.tot$y = prs.tot$y[, iid := .iid$iid]
+    prs.tot$y = prs.tot$y[, celltype := ".all"]
+    prs.tot = prs.tot$y
+
+    ## construct PRS vectors annotated by cell types
+    .pval.ld.tab = annot.pval.tab %>%
+        filter(`#chr` == .chr.num) %>%
+        filter(tss >= .lb, tes <= .ub)
+
+    take.ct.snps <- function(.ct) {
+
+        .annot.ct = .pval.ld.tab %>%
+            filter(celltype == .ct)
+
+        ret = tibble()
+        for(j in 1:nrow(.annot.ct)){
+            .lb.ct = .annot.ct$lb[j]
+            .ub.ct = .annot.ct$ub[j]
+
+            .ret.j = valid.snps %>%
+                filter(snp.loc > .lb.ct, snp.loc < .ub.ct)
+
+            ret = bind_rows(ret, .ret.j)
+        }
+
+        ret %>%
+            group_by(snp.loc) %>%
+            slice(which.max(abs(beta))) %>%
+            ungroup()
+    }
+
+    prs.ct = NULL
+
+    for(.ct in unique(.pval.ld.tab$celltype)) {
+        .snps.ct = take.ct.snps(.ct)
+
+        if(nrow(.snps.ct) < 10) next # at least 10 SNPs
+
+        .zz.ct = take.z.vector(.snps.ct)
+
+        .xx.ct = .plink$BED[ ,.snps.ct$x.pos, drop = FALSE]
+        .xx.test.ct = .plink.ref$BED[ ,.snps.ct$x.pos, drop = FALSE]
+
+        .prs.ct = pred.prs.cv(.zz.ct, .xx.ct, .xx.test.ct)
+        .prs.ct = .prs.ct$y
+        .prs.ct = .prs.ct[, iid := .iid$iid]
+        .prs.ct = .prs.ct[, celltype := .ct]
+
+        prs.ct = rbind(prs.ct, .prs.ct)
+    }
+
+    return(rbind(prs.tot, prs.ct))
 }
 
-prs.list = lapply(1:nrow(ld.tab), take.prs.ld)
-out.tab = data.table()
+prs.list = lapply(1:nrow(ld.tab), take.prs.ld.ct)
 
-.fun <- function(x) {
-    if(!is.na(x$cor) && x$cor >= 0) return(cbind(x$iid, x$y))
-    return(data.table())
-}
-
-.dt = lapply(prs.list, .fun)
-.dt = do.call(rbind, .dt)
-.dt = .dt[, .(score = sum(score)), by = iid]
-out.tab = rbind(out.tab, .dt)
+out.tab = bind_rows(prs.list) %>% as.data.table
+out.tab = out.tab[, .(score = sum(score)), by = .(iid, celltype)]
 
 write_tsv(out.tab, path = OUT.FILE)
