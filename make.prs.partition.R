@@ -16,7 +16,7 @@ GWAS.FILE = argv[3]            # e.g., "data/GWAS/clozuk_scz.bed.gz"
 ANNOT.FILE = argv[4]           # e.g., "data/gene_annot_limma_pval.tab.gz"
 CUTOFF = as.numeric(argv[5])   # e.g., 3
 CIS.DIST = as.numeric(argv[6]) # e.g., 1e5
-OUT.FILE = argv[7]             # e.g.,  "out.txt.gz"
+OUT.FILE = argv[7]             # e.g., "out.txt.gz"
 
 if(file.exists(OUT.FILE)) {
     log.msg("File exists: %s", OUT.FILE)
@@ -32,8 +32,6 @@ annot.pval.tab = read_tsv(ANNOT.FILE) %>%
     mutate(lb = pmax(tss - CIS.DIST, 0)) %>%
     mutate(ub = tes + CIS.DIST)
 
-effect.tab = fread(GWAS.FILE)
-
 REF.PLINK.DIR = "data/1KG_EUR/"
 
 ################################################################
@@ -48,28 +46,35 @@ ld.tab = readr::read_tsv(LD.FILE, col_types='cii') %>%
     mutate(query = chr %&&% ':' %&&% (start + 1) %&&% '-' %&&% (stop - 1)) %>%
     as.data.frame()
 
-effect.tab = fread(GWAS.FILE) # this is fast enough
+#' @param .chr
+#' @param .lb
+#' @param .ub
+read.gwas.tab <- function(.chr, .lb, .ub) {
 
-.names = colnames(effect.tab)
+    ret = fread("tabix -h " %&% GWAS.FILE %&% " " %&%
+                .chr %&% ":" %&% .lb %&% "-" %&% .ub)
 
-if("lodds" %in% .names) {
-    effect.tab[, beta := lodds]
+    .names = colnames(ret)
+
+    if("lodds" %in% .names) {
+        ret[, beta := lodds]
+    }
+
+    if(!("chr" %in% .names) && ("#CHR" %in% .names)) {
+        ret[, chr := `#CHR`]
+    }
+
+    if(!("chr" %in% .names) && ("#chr" %in% .names)) {
+        ret[, chr := `#chr`]
+    }
+
+    if(!("snp.loc" %in% .names)){
+        ret[, snp.loc := `stop`]
+    }
+
+    ret = ret[]
+    return(ret)
 }
-
-if(!("chr" %in% .names) && ("#CHR" %in% .names)) {
-    effect.tab[, chr := `#CHR`]
-}
-
-if(!("chr" %in% .names) && ("#chr" %in% .names)) {
-    effect.tab[, chr := `#chr`]
-}
-
-if(!("snp.loc" %in% .names)){
-    effect.tab[, snp.loc := `stop`]
-}
-
-effect.tab = effect.tab[]
-
 
 #' @param .svd SVD result
 #' @param tau regularization parameter
@@ -161,9 +166,11 @@ take.prs.ld.ct <- function(r) {
     .lb = ld.tab[r, "start"]
     .ub = ld.tab[r, "stop"]
 
+    ## .effect.1 = effect.tab[chr == .chr & snp.loc >= .lb & snp.loc <= .ub]
+    ## .effect.2 = effect.tab[chr == .chr.num & snp.loc >= .lb & snp.loc <= .ub]
 
-    .effect.1 = effect.tab[chr == .chr & snp.loc >= .lb & snp.loc <= .ub]
-    .effect.2 = effect.tab[chr == .chr.num & snp.loc >= .lb & snp.loc <= .ub]
+    .effect.1 = read.gwas.tab(.chr, .lb, .ub)
+    .effect.2 = read.gwas.tab(.chr.num, .lb, .ub)
 
     .effect = rbind(.effect.1, .effect.2)
     .effect = .effect[, chr := NULL][]
@@ -251,7 +258,7 @@ take.prs.ld.ct <- function(r) {
     for(.ct in unique(.pval.ld.tab$celltype)) {
         .snps.ct = take.ct.snps(.ct)
 
-        if(nrow(.snps.ct) < 10) next # at least 10 SNPs
+        if(nrow(.snps.ct) < 5) next # at least 5 SNPs
 
         .zz.ct = take.z.vector(.snps.ct)
 
@@ -275,3 +282,5 @@ out.tab = bind_rows(prs.list) %>% as.data.table
 out.tab = out.tab[, .(score = sum(score)), by = .(iid, celltype)]
 
 write_tsv(out.tab, path = OUT.FILE)
+unlink(TEMP.DIR, recursive = TRUE)
+log.msg("Done")
