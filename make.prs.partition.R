@@ -18,6 +18,11 @@ CUTOFF = as.numeric(argv[5])   # e.g., 3
 CIS.DIST = as.numeric(argv[6]) # e.g., 1e5
 OUT.FILE = argv[7]             # e.g.,  "out.txt.gz"
 
+if(file.exists(OUT.FILE)) {
+    log.msg("File exists: %s", OUT.FILE)
+    q()
+}
+
 ################################################################
 
 annot.pval.tab = read_tsv(ANNOT.FILE) %>%
@@ -165,10 +170,11 @@ take.prs.ld.ct <- function(r) {
 
     log.msg("Take an LD block: %d SNPs", nrow(.effect))
 
-
     .plink = subset.plink(PLINK.DIR %&% "/" %&% .chr, .chr, .lb, .ub, TEMP.DIR)
-
     .plink.ref = subset.plink(REF.PLINK.DIR %&% "/" %&% .chr, .chr, .lb, .ub, TEMP.DIR)
+
+    if(is.null(.plink)) return(data.table())
+    if(is.null(.plink.ref)) return(data.table())
 
     log.msg("Read genotypes: n=%d, n=%d", nrow(.plink$BED), nrow(.plink.ref$BED))
 
@@ -190,7 +196,7 @@ take.prs.ld.ct <- function(r) {
 
     if(nrow(valid.snps) == 0) {
         log.msg("No SNPs that satisfy our criteria")
-        return(list(cor = NA))
+        return(data.table())
     }
 
     valid.snps = valid.snps %>%
@@ -240,7 +246,7 @@ take.prs.ld.ct <- function(r) {
             ungroup()
     }
 
-    prs.ct = NULL
+    prs.ct = data.table()
 
     for(.ct in unique(.pval.ld.tab$celltype)) {
         .snps.ct = take.ct.snps(.ct)

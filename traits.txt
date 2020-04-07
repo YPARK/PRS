@@ -1,3 +1,5 @@
+clozuk_scz
+pgc_scz
 ctg_ad
 ctg_depressed-a
 ctg_insomnia
@@ -9,13 +11,8 @@ pgc_bip
 pgc_mdd
 pgc_ocd
 pgc_ptsd
-pgc_scz
 ssgac_cog
 ssgac_edu
-ssgac_ever-smoke
-ssgac_ndrink-week
-ssgac_nsex-part
-ssgac_risk-pc1
 ssgac_risk-tol
-ssgac_speeding
-clozuk_scz
+
+
