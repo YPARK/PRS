@@ -36,27 +36,35 @@ ld.tab = readr::read_tsv(LD.FILE, col_types='cii') %>%
     mutate(query = chr %&&% ':' %&&% (start + 1) %&&% '-' %&&% (stop - 1)) %>%
     as.data.frame()
 
-effect.tab = fread(GWAS.FILE) # this is fast enough
+#' @param .chr
+#' @param .lb
+#' @param .ub
+read.gwas.tab <- function(.chr, .lb, .ub) {
 
-.names = colnames(effect.tab)
+    ret = fread("tabix -h " %&% GWAS.FILE %&% " " %&%
+                .chr %&% ":" %&% .lb %&% "-" %&% .ub)
 
-if("lodds" %in% .names) {
-    effect.tab[, beta := lodds]
+    .names = colnames(ret)
+
+    if("lodds" %in% .names) {
+        ret[, beta := lodds]
+    }
+
+    if(!("chr" %in% .names) && ("#CHR" %in% .names)) {
+        ret[, chr := `#CHR`]
+    }
+
+    if(!("chr" %in% .names) && ("#chr" %in% .names)) {
+        ret[, chr := `#chr`]
+    }
+
+    if(!("snp.loc" %in% .names)){
+        ret[, snp.loc := `stop`]
+    }
+
+    ret = ret[]
+    return(ret)
 }
-
-if(!("chr" %in% .names) && ("#CHR" %in% .names)) {
-    effect.tab[, chr := `#CHR`]
-}
-
-if(!("chr" %in% .names) && ("#chr" %in% .names)) {
-    effect.tab[, chr := `#chr`]
-}
-
-if(!("snp.loc" %in% .names)){
-    effect.tab[, snp.loc := `stop`]
-}
-
-effect.tab = effect.tab[]
 
 #' @param .svd SVD result
 #' @param tau regularization parameter
@@ -140,8 +148,11 @@ take.prs.ld <- function(r) {
     .lb = ld.tab[r, "start"]
     .ub = ld.tab[r, "stop"]
 
-    .effect.1 = effect.tab[chr == .chr & snp.loc >= .lb & snp.loc <= .ub]
-    .effect.2 = effect.tab[chr == .chr.num & snp.loc >= .lb & snp.loc <= .ub]
+    ## .effect.1 = effect.tab[chr == .chr & snp.loc >= .lb & snp.loc <= .ub]
+    ## .effect.2 = effect.tab[chr == .chr.num & snp.loc >= .lb & snp.loc <= .ub]
+
+    .effect.1 = read.gwas.tab(.chr, .lb, .ub)
+    .effect.2 = read.gwas.tab(.chr.num, .lb, .ub)
 
     .effect = rbind(.effect.1, .effect.2)
     .effect = .effect[, chr := NULL][]
