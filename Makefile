@@ -21,7 +21,7 @@ JOBS_STEP1 := $(foreach geno, Ruzicka UK10K, $(foreach trt, $(Traits), jobs/step
 jobs/step1/prs.short.gz: $(JOBS_STEP1)
 	@[ -d $(dir $@) ] || mkdir -p $(dir $@)
 	@cat $^ | gzip > $@
-	[ $$(zless $@ | wc -l) -eq 0 ] || qsub -P compbio_lab -o /dev/null -binding linear:1 -cwd -V -l h_vmem=16g -l h_rt=24:00:00 -b y -j y -N STEP1_PARTITION -t 1-$$(zless $@ | wc -l) ./run_jobs.sh $@
+	[ $$(zless $@ | wc -l) -eq 0 ] || qsub -P compbio_lab -o /dev/null -binding linear:1 -cwd -V -l h_vmem=16g -l h_rt=24:00:00 -b y -j y -N STEP1_PRS -t 1-$$(zless $@ | wc -l) ./run_jobs.sh $@
 
 # % = $(GENO)/$(TRT) --> $(ODIR)/PRS_%.prs.gz
 jobs/step1/prs_%.job:

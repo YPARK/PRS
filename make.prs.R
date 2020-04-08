@@ -159,7 +159,7 @@ take.prs.ld <- function(r) {
 
     log.msg("Take an LD block: %d SNPs", nrow(.effect))
 
-    if(nrow(.effect) == 0) return(list(cor = NA))
+    if(nrow(.effect) == 0) return(data.table())
 
     .plink = subset.plink(PLINK.DIR %&% "/" %&% .chr, .chr, .lb, .ub, TEMP.DIR)
     .plink.ref = subset.plink(REF.PLINK.DIR %&% "/" %&% .chr, .chr, .lb, .ub, TEMP.DIR)
@@ -173,8 +173,8 @@ take.prs.ld <- function(r) {
 
     log.msg("After matching --> n=%d, n=%d", nrow(.plink$BED), nrow(.plink.ref$BED))
 
-    if(is.null(.plink)) return(list(cor = NA))
-    if(is.null(.plink.ref)) return(list(cor = NA))
+    if(is.null(.plink)) return(data.table())
+    if(is.null(.plink.ref)) return(data.table())
 
     valid.snps = .plink$BIM %>%
         select(-missing, -rs) %>%
@@ -188,7 +188,7 @@ take.prs.ld <- function(r) {
 
     if(nrow(valid.snps) == 0) {
         log.msg("No SNPs that satisfy our criteria")
-        return(list(cor = NA))
+        return(data.table())
     }
 
     valid.snps = valid.snps %>%
