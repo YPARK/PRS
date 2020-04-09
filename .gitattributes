@@ -1,0 +1,1 @@
+docs/share/*_UK10K/*.gz filter=lfs diff=lfs merge=lfs -text
