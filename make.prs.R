@@ -212,20 +212,10 @@ take.prs.ld <- function(r) {
     out = pred.prs.cv(zz, X, X.ref)
     out$y[, iid := .iid$iid]
     out$iid = .iid
-    return(out)
+    return(out$y)
 }
 
 prs.list = lapply(1:nrow(ld.tab), take.prs.ld)
-out.tab = data.table()
-
-.fun <- function(x) {
-    if(!is.na(x$cor) && x$cor >= 0) return(cbind(x$iid, x$y))
-    return(data.table())
-}
-
-.dt = lapply(prs.list, .fun)
-.dt = do.call(rbind, .dt)
-.dt = .dt[, .(score = sum(score)), by = iid]
-out.tab = rbind(out.tab, .dt)
-
+.dt = bind_rows(prs.list) %>% as.data.table
+out.tab = .dt[, .(score = sum(score)), by = iid]
 write_tsv(out.tab, path = OUT.FILE)
