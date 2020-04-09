@@ -51,7 +51,7 @@ jobs/step2/partition_%.job:
 # Calculate anova
 step3: jobs/step3/aov.short.gz
 
-JOBS_STEP3 := $(foreach geno, Ruzicka, $(foreach cutoff, $(CUTOFF), $(foreach cis, $(CIS_WINDOW), jobs/step3/aov_$(geno)/$(cutoff)_$(cis).job)))
+JOBS_STEP3 := $(foreach geno, Ruzicka UK10K, $(foreach cutoff, $(CUTOFF), $(foreach cis, $(CIS_WINDOW), jobs/step3/aov_$(geno)/$(cutoff)_$(cis).job)))
 
 jobs/step3/aov.short.gz: $(JOBS_STEP3)
 	@[ -d $(dir $@) ] || mkdir -p $(dir $@)
