@@ -1,5 +1,5 @@
 ---
-title: "The enrichemnt of polygenic risk scores in ScSZ"
+title: " "
 author: "Yongjin Park"
 date: "`r Sys.time()`"
 fig_caption: yes
@@ -8,6 +8,11 @@ csl: "apa.csl"
 bibliography: "mediation.bib"
 ---
 
+<style>
+p.caption {
+  font-size: 0.6em;
+}
+</style>
 
 ```{r global_opt, include = FALSE}
 options(stringsAsFactors = FALSE)
@@ -15,6 +20,7 @@ source('../Util.R')
 source('Util-rmd.R')
 library(tidyverse)
 library(data.table)
+library(patchwork)
 fig.dir <- 'Fig/2020-03-10/'
 dir.create(fig.dir, recursive = TRUE, showWarnings = FALSE)
 knitr::opts_knit$set(eval.after = 'fig.cap')
@@ -23,165 +29,428 @@ knitr::opts_chunk$set(warning = FALSE, message = FALSE,
 FIG.CAP <- '**Fig.**'
 ```
 
-```{r}
+```{r include = FALSE}
+annot.file = "../data/Ruzicka_Annotatoin.csv.gz"
 hto.file = "../data/HTO_Barcode_Key.csv" ## mapping
-.hto = read_csv(hto.file, col_types="ccc") %>%
-  rename(iid = Chip.Well.Barcode)
-```
+demo.file = "../data/annotation_demographics.xlsx" #
+med.file = "../data/annotation_medication.xlsx"
 
+.hto = read_csv(hto.file) %>% rename(iid = Chip.Well.Barcode)
 
-```{r ReadScSZ}
-a.data = readRDS("../data/ACTIONet_results.RDS")
+.demo = readxl::read_excel(demo.file) %>%
+  mutate(.id = "Batch" %&% Batch %&% "_HTO" %&% HTO) %>%
+  select(-Batch, -HTO) %>%
+  rename(dx=Dx, gender=Gender)
 
-H = a.data$archetypes$H %>% t %>% as.data.table
+.med = readxl::read_excel(med.file) %>%
+  (function(x) { colnames(x)[1] = "med.key"; x }) %>%
+  gather(key = ".id", value = "med.val", -med.key) %>%
+  spread(key=med.key, value=med.val)
 
-.iid = a.data$cell.meta %>%
-  select(HTO, Batch) %>% 
-  left_join(.hto, by = c("HTO", "Batch")) %>%
-  select(iid) %>%
+annot.tab = read.csv(annot.file) %>%
+  left_join(.hto) %>%
+  mutate(.id = Batch %&% "_" %&% HTO) %>%
+  select(-Batch, -HTO) %>%
+  left_join(.demo) %>%
+  left_join(.med) %>%
   as.data.table
 
-H = cbind(.iid, H)
+## Annotate PRS tab by Brad Ruzicka's Dx
+annotate.dt <- function(data.tab,
+                        .dx = c("c", "bd", "s"),
+                        .dx.str = c("Control", "BIP", "SZ")
+                        ) {
 
-.collapse.dt <- function(H, .fun){
-  H[, lapply(.SD, .fun), by = .(iid)] %>%
-    as_tibble %>%
-    gather(key=archetype, value=activity, -iid)
+  .dt = merge(data.tab, annot.tab, by = "iid")
+  .dt = .dt[, Dx := factor(Dx, .dx, .dx.str)]
+  return(.dt)
 }
 
-h.sum = .collapse.dt(H, sum)
-h.mean = .collapse.dt(H, mean)
-h.sd = .collapse.dt(H, sd)
-h.cv = .collapse.dt(H, function(x) sd(x)/mean(x))
+show.boxplot <- function(data.tab) {
+
+  .cmp = list(c("Control", "BIP"), c("BIP", "SZ"), c("Control", "SZ"))
+  .n = nrow(data.tab)
+
+  ggplot(data.tab, aes(x = Dx, y = score)) +
+    theme_classic() +
+    ylab("polygenic risk score (n=" %&% .n %&% ")") +
+    xlab("individuals grouped by diagnosis") +
+    geom_violin(aes(fill=Dx), show.legend=FALSE, size=0) +
+    ggpubr::stat_compare_means(size=3, comparisons=.cmp, method="t.test") +
+    geom_boxplot(fill="white", width=.2, outlier.size=.05, notch=TRUE) +
+    scale_fill_brewer()
+}
 ```
+
+### Polygenic risk scores predict genetic predisposition of complex traits
+
+```{r FigPRS_vs_Dx, fig.width=6, fig.height=4, echo = FALSE, results="asis"}
+pgc.tab = "share/PRS_Ruzicka/pgc_scz.prs.gz" %>%
+  fread() %>%
+  as.data.table() %>% 
+  annotate.dt()
+
+pve.pgc = glm.pve("SZ", pgc.tab, .exclude = "BIP")
+
+clozuk.tab = "share/PRS_Ruzicka/clozuk_scz.prs.gz" %>%
+  fread() %>%
+  as.data.table() %>% 
+  annotate.dt()
+
+pve.clozuk = glm.pve("SZ", clozuk.tab, .exclude = "BIP")
+
+p1 = show.boxplot(pgc.tab) +
+  ggtitle(sprintf("PGC\n(var. %.2f%%, P=%.2e)", 100*pve.pgc$pve, pve.pgc$p.val))
+
+p2 = show.boxplot(clozuk.tab) +
+  ggtitle(sprintf("CLOZUK\n(var. %.2f%%, P=%.2e)", 100*pve.clozuk$pve, pve.clozuk$p.val))
+
+plt = (p1 | p2)
+
+print(plt)
+.file = fig.dir %&% "/FigPRS_vs_Dx.pdf"
+.gg.save(.file, plot=plt, width=6, height=4)
+cat("[PDF](" %&% .file %&% ")\n")
+```
+
+**Fig.** Unsupervised polygenic risk scores (PRS) constructed by common variants (MAF $\ge$ 5%) predict disease genetic predisposition of Schizophrenia. 
+
+We trained PRS models with the two different GWAS summary statistics (PGC only [@Schizophrenia_Working_Group_of_the_Psychiatric_Genomics_Consortium2014-ro] and PGC + CLOZUK meta analysis [@Pardinas2018-pc]) without using the label of disease diagnosis.
+In our PRS model, we only need to estimate L2-regularization parameter $\tau$, and each $\tau$ value was selected to maximize consistency of PRS results across multiple reference panels. Here, we optimized for consistency between the results of our cohort and the 1000 genomes project [@The_1000_Genomes_Project_Consortium2015-jd] cohort with European ancestry (see the methods for details).
+
+By grouping `r nrow(pgc.tab)` subjects into `r length(unique(pgc.tab$Dx))` groups, `r sum(pgc.tab$Dx == "SZ")` schizophrenia, `r sum(pgc.tab$Dx == "BIP")` bipolar, `r sum(pgc.tab$Dx == "Control")` control subjects, we tested the accuracy of our unsupervised PRS models (Fig.XX). In the logistic regression model (SZ vs. control, N=`r sum(pgc.tab$Dx != "BIP")`), our PRS scores trained in PGC and CLOZUK GWAS can explain `r num.round(100*pve.pgc$pve)`% and `r num.round(100*pve.clozuk$pve)`% phenotypic variance with significant p-value (P=`r num.sci(pve.pgc$p.val)` and `r num.sci(pve.clozuk$p.val)`). 
+
+### Expression quantitative trait score (eQTS) analysis estimates the association between cell-type-specific gene expression and PRS
+
+```{r calc_eqts_stat}
+################################################################
+eqts.file = "share/Ruzicka/eQTS.gz"
+dir.create(dirname(eqts.file), recursive=TRUE, showWarnings=FALSE)
+
+if(!file.exists(eqts.file)) {
+
+  a.data = load.data("../data/final_scores.RData")
+  PBs = a.data$PBs
+
+  calc.assoc <- function(j, .prs) {
+
+    .mat = PBs[[j]] %>% SummarizedExperiment::assay()
+    .ct = names(PBs)[j]
+    .prs = .prs %>% select(iid, score)
+
+    log.msg("%d, %s", j, .ct)
+
+    .dt = .mat %>%
+      as.data.frame() %>% 
+      mutate(hgnc_symbol = rownames(.mat)) %>%
+      gather(key="batch.hto", value="x", -hgnc_symbol) %>%
+      separate("batch.hto", c("Batch", "HTO"), sep="[.]") %>%
+      left_join(.hto, by = c("HTO", "Batch")) %>%
+      select(-HTO, -Batch) %>%
+      left_join(.prs, by = "iid") %>%
+      as.data.table
+
+    xx = dcast(.dt, iid ~ hgnc_symbol, value.var = "x")
+
+    yy = tibble(iid = xx$iid) %>%
+      left_join(.prs, by = "iid")
+
+    xx = xx %>% select(-iid) %>% as.matrix %>% scale
+    yy = yy %>% select(-iid) %>% as.matrix %>% scale
+
+    xx[is.na(xx)] = 0
+
+    ######################
+    ## remove top 3 PCs ##
+    ######################
+
+    .svd = rsvd::rsvd(xx, k=3)
+    .remove = zqtl::calc.qtl.stat(.svd$u, as.matrix(yy)) %>%
+      filter(p.val < 1e-2) %>% select(x.col) %>% unlist(use.names=FALSE)
+
+    uu = .svd$u
+    if(length(.remove) > 0) {
+      uu = uu[, - .remove, drop=FALSE]
+    }
+
+    xx.resid = lm(xx ~ uu) %>% residuals %>% as.matrix
+
+    x.tib = tibble(gene = colnames(xx)) %>%
+      mutate(x.col = 1:n())
+
+    ret = zqtl::calc.qtl.stat(xx.resid, yy) %>%
+      left_join(x.tib, by = "x.col") %>%
+      select(-y.col, -x.col) %>%
+      mutate(celltype = .ct)
+
+    log.msg("done ... %d, %s", j, .ct)
+
+    return(ret)
+  }
+
+  .gwas.files = list.files("share/PRS_Ruzicka/", ".prs.gz", full.names=TRUE)
+
+  calc.assoc.gwas <- function(i) {
+    .prs = .gwas.files[i] %>%
+      fread() %>% 
+      as.data.table()
+
+    .gwas = .gwas.files[i] %>% basename() %>% str_remove_all(".prs.gz")
+
+    lapply(1:length(PBs), calc.assoc, .prs = .prs) %>%
+      bind_rows() %>%
+      mutate(gwas = .gwas) %>%
+      as.data.table
+  }
+
+  eqts.tab = lapply(1:length(.gwas.files), calc.assoc.gwas) %>%
+    bind_rows() %>% as.data.table
+
+  fwrite(eqts.tab, eqts.file)
+
+} else {
+  
+  eqts.tab = fread(eqts.file)
+
+}
+
+trait.names = read_tsv("trait.names.txt", col_names=c("gwas", "gwas.name"))
+################################################################
+```
+
+```{r FigEQTS_hist, echo=FALSE, include=FALSE}
+.file = fig.dir %&% "/FigEQTS_hist.pdf"
+pdf(.file, width=4, height=3)
+. = hist(eqts.tab$p.val, ylab = "frequency", xlab = "eQTS p-value", main = "")
+dev.off()
+```
+
+We sought to identify genes that are regulating or regulated by the polygenic effects by correlating the computed PRS with the cell-type-specific expression variation across 48 individuals. In the previous work [@Vosa2018-li], correlation patterns between observed expression and PRS, termed eQTS (expression quantitative trait score), were shown to capture trans-acting regulatory mechanisms. To prevent the genome-wide association statistics from being inflated by hidden confounding factors, we adjusted top three principal components from each cell-type-specific expression matrix and obtained properly calibrated p-value distribution (Supp.Fig.XX). 
+
+```{r results="asis", echo=FALSE}
+cat("[p-value histogram](" %&% .file %&% ")\n")
+```
+
+```{r read_eqts_fdr}
+fdr.cutoff = .1
+## FDR calibration for each GWAS and celltype --> could be lenient
+## read diff. expr. p-value
+de.pval.tab = fread("../data/gene_annot_limma_pval.tab.gz") %>%
+  gather(key = "celltype", value = "pval.de",
+         - `#chr`, -tss, -tes, -hgnc_symbol) %>%
+  dplyr::rename(gene = hgnc_symbol)
+
+.celltype = de.pval.tab$celltype # come on... match the names!
+.celltype[.celltype == "Ex-SZ+"] = "Ex-L2/3 (SZ)"
+
+de.pval.tab = de.pval.tab %>% 
+  as_tibble %>% 
+  mutate(celltype = .celltype) %>% 
+  as.data.table()
+
+eqts.tab = eqts.tab %>% merge(de.pval.tab)
+
+eqts.tab = eqts.tab[, q.val.de := p.adjust(10^(-pval.de), "fdr"),
+                    by = .(celltype, gwas)]   
+
+eqts.tab = eqts.tab[, q.val := p.adjust(p.val),
+                    by = .(gwas, celltype)]
+
+.show = eqts.tab[q.val < fdr.cutoff | q.val.de < fdr.cutoff] # show FDR < cutoff
+.genes = .show[, .(gene)] %>% unique %>% unlist(use.names=FALSE)
+.celltypes = .show[, .(celltype)] %>% unique %>% unlist(use.names=FALSE)
+.eqts = eqts.tab[gene %in% .genes]
+```
+
+```{r include=FALSE}
+.scz = eqts.tab[q.val < fdr.cutoff & gwas %in% c("pgc_scz", "clozuk_scz")]
+```
+
+
+Including the two schizophrenia GWAS summary statistics, we constructed PRS matrix for total `r nrow(trait.names)` mental health-related traits: `r paste(trait.names$gwas.name, sep=", ")`. Followed by eQTS analysis for each cell type, we identified `r length(.genes)` genes are significantly regulated by polygenic effects (FDR < `r fdr.cutoff`).
+Of them, we found `r length(unique(.scz$gene))` genes in `r length(unique(.scz$celltype))` cell types are significantly associated with SZ risk scores.
+
+```{r FigEQTS_SZ, fig.width=14, fig.height=7, results = "asis"}
+################################################################
+.dt = eqts.tab[gwas %in% c("clozuk_scz", "pgc_scz")]
+
+.dt.sig = .dt[order(.dt$p.val), head(.SD,1), by=.(gene)]
+.dt.sig = .dt.sig[q.val < fdr.cutoff]
+
+.dt.de = .dt[order(.dt$q.val.de), head(.SD,1), by=.(gene)]
+.dt.de = .dt.de[q.val.de < fdr.cutoff]
+.dt.de.lab = .dt.de[order(.dt.de$q.val.de), head(.SD,3), by=.(`#chr`)]
+
+.dt.rand = .dt[sample(nrow(.dt)), head(.SD, 1), by = .(gene)] # to show random jitter
+
+p1 = .gg.plot(.dt.rand, aes(x=tss, y=beta)) +
+  theme(axis.text = element_text(size=4)) +
+  theme(axis.text.x = element_text(angle=90, vjust=1, hjust=1)) +
+  theme(legend.position = "bottom") +
+  theme(legend.title = element_blank()) +
+  xlab("genomic location (mb)") + ylab("effect size") +
+  scale_x_continuous(labels=function(x) round(x/1e6)) +
+  facet_grid(.~`#chr`, scales="free", space="free") +
+  geom_point(color="gray", size=.5, pch=19) +
+  geom_hline(yintercept = 0) +
+  geom_linerange(aes(ymin=beta-2*se,ymax=beta+2*se), data=.dt.sig, size=.2) +
+  geom_point(aes(fill=celltype), data=.dt.sig, size=2, pch=21) +
+  ggrepel::geom_text_repel(aes(label=gene), data=.dt.sig, size=3) +
+  geom_point(data=.dt.de, size=1, pch=19, color="gray20") +
+  ggrepel::geom_text_repel(aes(label=gene), data=.dt.de.lab, size=3) +
+  scale_fill_brewer(palette="Spectral")
+
+p2 = .gg.plot(.dt.rand, aes(x=tss, y=-log10(p.val))) +
+  theme(axis.text = element_text(size=4)) +
+  theme(axis.text.x = element_text(angle=90, vjust=1, hjust=1)) +
+  theme(legend.position = "bottom") +
+  theme(legend.title = element_blank()) +
+  xlab("genomic location (mb)") + ylab("eQTS p-value") +
+  scale_x_continuous(labels=function(x) round(x/1e6)) +
+  scale_y_continuous(labels=function(x) 10^(-x)) +
+  facet_grid(.~`#chr`, scales="free", space="free") +
+  geom_point(color="gray", size=.5, pch=19) +
+  geom_point(aes(fill=celltype), data=.dt.sig, size=2, pch=21) +
+  ggrepel::geom_text_repel(aes(label=gene), data=.dt.sig, size=3) +
+  geom_point(data=.dt.de, size=1, pch=19, color="gray20") +
+  ggrepel::geom_text_repel(aes(label=gene), data=.dt.de.lab, size=3) +
+  scale_fill_brewer(palette="Spectral")
+
+plt = p1 / p2
+
+print(plt)
+.file = fig.dir %&% "/FigEQTS_SZ.pdf"
+.gg.save(.file, plot=plt, width=14, height=7)
+cat("[PDF](" %&% .file %&% ")\n")
+```
+
+
+```{r FigEQTS, fig.width=5, fig.height=7, results="asis"}
+.dt = .eqts[q.val < fdr.cutoff]
+
+.gene.ct = .dt[order(.dt$p.val), head(.SD, 1), by = .(gene, gwas)]
+.gene.ct = .gene.ct[, head(.SD, 3), by = .(gwas)]
+.gene.ct = .gene.ct[, .(gene, celltype)] %>% distinct() %>% as_tibble
+
+.dt = left_join(.gene.ct, .eqts) %>% 
+  left_join(trait.names, by = "gwas") %>%   
+  as.data.table
+
+.dt = .dt[order(.dt$p.val), head(.SD,1), by=.(gwas.name, gene)] %>% 
+  mutate(row = gwas.name) %>% 
+  mutate(col = gene %&% " in " %&&% celltype) %>%
+  mutate(weight = -log10(p.val)) %>% 
+  order.pair(ret.tab = TRUE) %>%
+  as.data.table()
+
+plt = ggplot(.dt, aes(x=row, y=col)) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle=90, vjust=0, hjust=0)) +
+  theme(legend.key.width=unit(.2,'lines')) +
+  theme(legend.key.height=unit(.5,'lines')) +
+  theme(legend.text=element_text(size=5)) +
+  theme(legend.title=element_text(size=5)) +
+  xlab("GWAS") +
+  ylab("Genes") +
+  scale_x_discrete(position = "top") +
+  geom_tile(aes(fill = -log10(pmax(q.val, 1e-3))), color="gray") +
+  scale_fill_distiller("FDR", direction = 1, palette="Blues",
+                       labels=function(x) num.round(100*10^(-x)) %&% "%") +
+  scale_size_continuous(range=c(0,5), labels=function(x) 10^(-x))
+
+print(plt)
+.file = fig.dir %&% "/FigEQTS.pdf"
+.gg.save(.file, plot=plt, width=5, height=7)
+cat("[PDF](" %&% .file %&% ")\n")
+```
+
+
+
+```{r FigEQTS_vs_DE, results="asis", echo = FALSE, results="asis"}
+.dt = merge(eqts.tab, trait.names, by = "gwas")
+
+plot.eqts.vs.de <- function(.gwas) {
+
+  .dt.g = .dt[gwas == .gwas]
+
+  .dt.lab.1 = .dt.g[q.val < fdr.cutoff]
+  .dt.lab.2 = .dt.g[q.val.de < fdr.cutoff]
+  .dt.lab.2 = .dt.lab.2[order(.dt.lab.2$q.val.de), head(.SD, 5), by=.(celltype)]
+  .dt.lab = rbind(.dt.lab.1, .dt.lab.2) %>% unique
+
+  .gg.plot(.dt.g, aes(x = pval.de, y = -log10(p.val))) +
+    xlab("Diff.Expr. (-log10P)") +
+    ylab("eQTS (-log10P) ~ " %&% .dt.g$gwas.name[1]) +
+    facet_wrap(~celltype, nrow = 4) +
+    theme(strip.background = element_blank()) +
+    geom_hex(aes(colour=..count..)) +
+    scale_fill_distiller(direction = 1, palette="Blues", trans="sqrt") +
+    scale_color_distiller(direction = 1, palette="Blues", trans="sqrt") +
+    geom_point(data=.dt.lab, pch=21, color="red") +
+    ggrepel::geom_text_repel(aes(label=gene), data=.dt.lab, segment.size=.2, size=3)
+}
+
+for(.gwas in unique(.dt$gwas)) {
+  plt = plot.eqts.vs.de(.gwas)
+  .file = fig.dir %&% "/FigEQTS_vs_DE_" %&% .gwas %&% ".pdf"
+  .gg.save(.file, plot = plt, width = 6, height = 7)
+  cat("[" %&% .gwas %&% "](" %&% .file %&% ") ")
+}
+```
+
 
 
 ```{r}
-prs.assoc.tab <- function(prs.tab, stat.tab) {
+plot.eqts.ct <- function(.ct) {
 
-  .df = stat.tab %>%
-    left_join(prs.tab, by = "iid") %>%
-    spread(key = archetype, value = activity)
+  .dt = .eqts %>%
+    filter(celltype == .ct) %>% 
+    merge(de.pval.tab, by = c("gene", "celltype")) %>% 
+    merge(trait.names, by = "gwas") %>% 
+    na.omit
 
-  xx = .df %>% select(-iid, -score) %>% as.matrix
-  yy = .df %>% select(score) %>% as.matrix
+  .dt = .dt %>%
+    mutate(row = gwas.name) %>% 
+    mutate(col = gene) %>%
+    mutate(weight = -log10(p.val)) %>% 
+    order.pair(ret.tab = TRUE) %>%
+    as.data.table()
 
-  x.tib = tibble(archetype = colnames(xx)) %>%
-    mutate(x.col = 1:n())
+  .dt.mark = .dt[q.val < fdr.cutoff]
 
-  assoc.stat = calc.qtl.stat(xx, yy) %>%
-    left_join(x.tib, by = "x.col") %>%
-    mutate(q.val = p.adjust(p.val, method="BH")) %>% 
-    select(-x.col, -y.col)
-}
-
-read.assoc.tab <- function(f, .stat) {
-  b = basename(f) %>%
-    str_remove(".prs.gz") %>%
-    str_to_upper
-
-  fread(f) %>%
-    as_tibble %>%
-    filter(level == 1) %>%
-    select(iid, score) %>% 
-    prs.assoc.tab(stat.tab = .stat) %>%
-    mutate(trait = b)
-}
-
-plot.trait.assoc <- function(stat){
-
-  assoc.df = lapply(.files, read.assoc.tab, .stat = stat) %>%
-    bind_rows
-
-  .order = assoc.df %>%
-    mutate(col = trait, row = archetype, weight = -log10(p.val)) %>% 
-    order.pair
-
-  .df = assoc.df %>%
-    mutate(col = factor(trait, .order$cols), row = factor(archetype, .order$rows))
-
-  .tn = scales::trans_new("neg.pow.10", function(y) -log10(y), function(x) 10^(-x))
-
-  .df.sig = .df %>% filter(p.val < .05) %>% mutate(t.stat = beta/se)
-
-  plt = ggplot(.df, aes(x=col, y=row, fill=p.val)) +
-    scale_x_discrete(position = "top") +
+  ggplot(.dt, aes(x=row, y=col)) +
+    ggtitle(.ct) +
+    theme_bw() +
     theme(axis.text.x = element_text(angle=90, vjust=0, hjust=0)) +
-    xlab("GWAS traits") + ylab("Archetypes") +
-    geom_tile(size=.2) +
-    geom_text(data=.df.sig, mapping=aes(label=round(t.stat,1)), size=2) +
-    scale_fill_distiller("associatoin\np-value",
-                         direction = -1,
-                         palette="YlGnBu",
-                         breaks = c(.001, .01, .05, .5, 1),
-                         labels = num.sci,
-                         trans = .tn)
-  return(plt)
+    theme(legend.key.width=unit(.2,'lines')) +
+    theme(legend.key.height=unit(.5,'lines')) +
+    theme(legend.text=element_text(size=5)) +
+    theme(legend.title=element_text(size=5)) +
+    xlab("GWAS") +
+    ylab("Genes") +
+    scale_x_discrete(position = "top") +
+    geom_point(aes(size=weight,fill=beta), pch=22, stroke=.2) +
+    geom_point(data=.dt.mark, pch="*", color="white", size=5) +
+    scale_size_continuous("p-value", range=c(0,5), breaks=seq(0,5), labels=function(x) 10^(-x)) +
+    scale_fill_distiller("eQTS\neffect", palette="RdBu",direction=-1)
+
 }
 ```
 
+## methods
 
-### PRS association with the overall activity of 20 archetypes
+### Robust polygenic risk score prediction by spectral decomposition
 
-```{r FigTraitAssocSum, fig.width=5, fig.height=5}
-.files = list.files("share/PRS_Ruzicka/", pattern="prs.gz", full.names=TRUE)
-plt = plot.trait.assoc(h.sum) + ggtitle("archetype sum ~ PRS") 
-print(plt)
-.file = fig.dir %&% "/FigTraitAssocSum.pdf"
-.gg.save(filename = .file, plot = plt, width=5, height=5)
-```
+We estimate polygenic risk score (PRS) using spectral decomposition of the underlying genotype matrix, $X$ (sample by variants), of the cohort.  We propose a robust and straightforward PRS method that estimates a vector of multivariate effect size, $\boldsymbol{\theta}$, from a vector of univariate GWAS summary statistics.  If we have sufficiently large number of individuals, we can simply estimate $\boldsymbol{\theta} = R^{-1} \mathbf{z}$ by taking an inverse matrix of the LD matrix, namely $R \overset{\Delta}{=} X^{\top}X/n$. In practice, we take the psuedo-inverse of $R$, namely $R^{-1}\approx VD^{-2}V^{\top}$, based on singular value decomposition of the genotype matrix, $X=UDV^{\top}$, and this results in the estimate of multivariate effect size $\boldsymbol{\theta} \approx VD^{-2}V^{\top}\mathbf{z}$. By substituting this result to a linear model, $\mathbf{y} \sim X \boldsymbol{\theta}$, we predict a PRS vector, $\hat{\mathbf{y}} = UD^{-1}V^{\top}\mathbf{z}$. To account for discrepancy of the LD matrix $R$ between our cohort and the actual GWAS cohort, we introduce regularization parameter $\tau$ (ridge regression): $\hat{\mathbf{y}} = U(D + \tau I)^{-1}V^{\top} \mathbf{z}$.
 
-* The numbers denote t-statistics for the associations with nominal p-value < 0.05
+### Hyper-parameter tuning without phenotype labels
 
-```{r results="asis"}
-cat("[PDF](" %&% .file %&% ")\n\n")
-```
+A conventional PRS approach tunes hyper-parameters, such as p-value thresholding and LD-clumping, by comparing the predicted PRS vector $\hat{\mathbf{y}}$ against actual observed phenotypes $\mathbf{y}_{\mathsf{obs}}$. Here, we show that the regularization parameter $\tau$ can be optimized without looking at the observed $\mathbf{y}_{\mathsf{obs}}$. Instead of optimizing the prediction accuracy cross-validated against a small cohort of individuals, we focus on improving the robustness of PRS methods across multiple cohorts.  The basic idea is that we want a prediction score (and the underlying regression coefficient matrix) is robustly reproducible across multiple cohorts.
 
-### PRS association with the mean of 20 archetypes
+Here we use the genotypes of `r nrow(pgc.tab)` individuals as a primary matrix $X$, while additionally using the 1000G reference panel genotype matrix $\tilde{X}$.  Let us define the multivariate regression parameters $\hat{\theta}(\tau) \overset{\Delta}{=} V(D + \tau I)^{-2}V^{\top}\mathbf{z}$ as a function of the hyperparameter $\tau$. We can construct a prediction vector on a new genotype matrix $\tilde{X}$ for each $\tau$ value, namely $\mathbf{y}(\tau)\overset{\Delta}{=} \tilde{X} \hat{\theta}(\tau)$. On the other hand, based on the SVD of the 1000G panel, namely $\tilde{X} = \tilde{U} \tilde{D} \tilde{V}^{\top}$, we can construct another PRS vector $\tilde{\mathbf{y}} = \tilde{U} \tilde{D}^{-1} \tilde{V}^{\top} \mathbf{z}$.
 
-```{r FigTraitAssocMean, fig.width=5, fig.height=5}
-.files = list.files("share/PRS_Ruzicka/", pattern="prs.gz", full.names=TRUE)
-plt = plot.trait.assoc(h.mean) + ggtitle("archetype mean ~ PRS") 
-print(plt)
-.file = fig.dir %&% "/FigTraitAssocMean.pdf"
-.gg.save(filename = .file, plot = plt, width=5, height=5)
-```
-
-* The numbers denote t-statistics for the associations with nominal p-value < 0.05
-
-```{r results="asis"}
-cat("[PDF](" %&% .file %&% ")\n\n")
-```
-
-### PRS association with the coefficient of variation (CV) of 20 archetypes
-
-```{r FigTraitAssocCV, fig.width=5, fig.height=5}
-.files = list.files("share/PRS_Ruzicka/", pattern="prs.gz", full.names=TRUE)
-plt = plot.trait.assoc(h.cv) + ggtitle("archetype CV ~ PRS") 
-print(plt)
-.file = fig.dir %&% "/FigTraitAssocCV.pdf"
-.gg.save(filename = .file, plot = plt, width=5, height=5)
-```
-
-* The numbers denote t-statistics for the associations with nominal p-value < 0.05
-
-```{r results="asis"}
-cat("[PDF](" %&% .file %&% ")\n\n")
-```
+Since these two PRS vectors are based on the same set of individuals (\tilde{X} matrix), we can measure the concordance between them by Spearman's correlation. Based on this score, we tune the parameter $\tau$, namely, $\hat{\tau} \gets \underset{\tau}{\arg\max} \, \mathsf{corr}(\mathbf{y}(\tau), \tilde{\mathbf{y}})$. To find the optimal point, we employ a simple line search algorithm.
 
 
-### PRS association with the standard deviation of 20 archetypes
+## Reference
 
-```{r FigTraitAssocSd, fig.width=5, fig.height=5}
-.files = list.files("share/PRS_Ruzicka/", pattern="prs.gz", full.names=TRUE)
-plt = plot.trait.assoc(h.sd) + ggtitle("archetype SD ~ PRS") 
-print(plt)
-.file = fig.dir %&% "FigTraitAssocSd.pdf"
-.gg.save(filename = .file, plot = plt, width=5, height=5)
-```
-
-* The numbers denote t-statistics for the associations with nominal p-value < 0.05
-
-```{r results="asis"}
-cat("[PDF](" %&% .file %&% ")\n\n")
-```

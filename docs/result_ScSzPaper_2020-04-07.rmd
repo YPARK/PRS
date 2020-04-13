@@ -1,0 +1,118 @@
+---
+title: "The enrichemnt of polygenic risk scores in ScSZ"
+author: "Yongjin Park"
+date: "`r Sys.time()`"
+fig_caption: yes
+theme: "jekyll-theme-minimal"
+csl: "apa.csl"
+bibliography: "mediation.bib"
+---
+
+
+```{r global_opt, include = FALSE}
+options(stringsAsFactors = FALSE)
+source('../Util.R')
+source('Util-rmd.R')
+library(tidyverse)
+library(data.table)
+library(patchwork)
+fig.dir <- 'Fig/2020-04-07/'
+dir.create(fig.dir, recursive = TRUE, showWarnings = FALSE)
+knitr::opts_knit$set(eval.after = 'fig.cap')
+knitr::opts_chunk$set(warning = FALSE, message = FALSE,
+                      fig.path = fig.dir, fig.width = 8, fig.height = 8)
+FIG.CAP <- '**Fig.**'
+```
+
+```{r}
+.name = read_tsv("trait.names.txt", col_names=c("trait", "trait.name"), col_types="cc")
+
+aov.tab = fread("share/AOV_Ruzicka/aov_3_1e4.txt.gz") %>%
+  left_join(.name, by = "trait")
+
+aov.uk10k.tab = fread("share/AOV_UK10K/aov_3_1e4.txt.gz") %>%
+  left_join(.name, by = "trait")
+
+```
+
+
+```{r}
+merge.df.trait <- function(.trait) {
+  .df = aov.tab %>% filter(trait == .trait) %>% arrange(celltype)
+  .df1 = aov.uk10k.tab %>% filter(trait == .trait) %>% arrange(celltype)
+  left_join(.df, .df1, suffix=c("_ruzicka", "_uk10k"),
+            by = c("trait", "celltype","trait.name"))
+}
+
+.plot.replication <- function(.trait, error.bar = TRUE) {
+
+  .df = merge.df.trait(.trait) %>% na.omit
+
+  .df.fg = .df %>% filter(beta_ruzicka > 0, beta_uk10k > 0, pval.t_uk10k < 1e-2 | pval.t_ruzicka < 1e-2)
+  .df.bg = .df %>% filter(!(celltype %in% .df.fg$celltype))
+
+  .x.max = max(.df$beta_ruzicka+.df$se_ruzicka)
+  .y.max = max(.df$beta_uk10k+.df$se_uk10k)
+
+  if(error.bar) {
+    
+    plt = .gg.plot(.df, aes(x=beta_ruzicka, y=beta_uk10k)) +
+      geom_rect(xmin=0, ymin=0, xmax=.x.max, ymax=.y.max, fill="#ccebc5", size=0, alpha = .2) +
+      ggtitle(.df$trait.name[1]) +
+      geom_segment(aes(x=beta_ruzicka, xend=beta_ruzicka, y=beta_uk10k-se_uk10k, yend=beta_uk10k+se_uk10k), size=.1) +
+      geom_segment(aes(x=beta_ruzicka-se_ruzicka, xend=beta_ruzicka+se_ruzicka, y=beta_uk10k, yend=beta_uk10k), size=.1) +
+      xlab("cell-type polygenic effect (Ruzicka et al. genotype)") +
+      ylab("cell-type polygenic effect (UK10K genotype)") +
+      geom_point(data = .df.bg, size=.5) +
+      ggrepel::geom_text_repel(aes(label=celltype), size=2, data=.df.bg, color="gray40", nudge_x=-1, vjust=1, hjust=1, segment.size=.1) +
+      geom_point(data = .df.fg, color = "gray20", size=2, pch = 21, fill = "white") +
+      ggrepel::geom_text_repel(aes(label=celltype), size=3, data=.df.fg, nudge_x=1, vjust=0, hjust=0, segment.size=.1, fontface="bold")
+    
+  } else {
+    plt = .gg.plot(.df, aes(x=beta_ruzicka, y=beta_uk10k)) +
+      geom_rect(xmin=0, ymin=0, xmax=.x.max, ymax=.y.max, fill="#ccebc5", size=0, alpha = .2) +
+      ggtitle(.df$trait.name[1]) +
+      geom_point(data = .df.bg, size=.5) +
+      geom_point(data = .df.fg, color = "gray20", size=2, pch = 21, fill = "white") +
+      xlab("Ruzicka et al.") +
+      ylab("UK10K")
+  }
+
+  return(plt)
+}
+```
+
+```{r Fig_Replication_SCZ, fig.width=6, fig.height=3}
+
+p1 = .plot.replication("pgc_scz")
+p2 = .plot.replication("clozuk_scz")
+plt = p1 | p2
+print(plt)
+```
+
+```{r Fig_Replication_All, fig.width=8, fig.height=4}
+lapply(unique(aov.tab$trait), .plot.replication, error.bar=FALSE) %>%
+  wrap_plots(nrow = 3)
+```
+
+```{r Fig_PVE, fig.width=4, fig.height=3}
+.df = aov.tab %>%
+  as_tibble %>% 
+  mutate(weight = if_else(beta > 0, -log10(pval.pve), 0)) %>%
+  mutate(col = trait.name, row = celltype) %>% 
+  order.pair(ret.tab=TRUE)
+
+.df.lab = .df %>% filter(pval.pve < 0.1, beta > 0)
+
+.gg.plot(.df, aes(y=row, x=col, fill=pmin(weight,5))) +
+  xlab("GWAS") +
+  ylab("cell type") +
+  theme(axis.text.x = element_text(angle=90, vjust=0, hjust=0)) +
+  scale_x_discrete(position = "top") +
+  geom_tile(color="gray20", size=.1) +
+  geom_text(aes(label=round(100*pve)), data=.df.lab, size=3, color="white", fontface="bold") +
+  scale_fill_distiller("p-value",direction = 1, palette="Blues",
+                       labels = function(x) num.sci(10^(-x)))
+
+```
+

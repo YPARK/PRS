@@ -1,0 +1,16 @@
+clozuk_scz	SCZ(2018)
+pgc_scz	SCZ(2014)
+ctg_ad	AD
+ctg_depressed-a	Depression
+ctg_insomnia	Insomnia
+ctg_iq	IQ
+ctg_worry	Worry
+pgc_adhd	ADHD
+pgc_asd	ASD
+pgc_bip	BIP
+pgc_mdd	MDD
+pgc_ocd	OCD
+pgc_ptsd	PTSD
+ssgac_cog	COG
+ssgac_edu	EDU
+ssgac_risk-tol	Risk-tol
